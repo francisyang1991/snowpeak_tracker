@@ -124,6 +124,7 @@ forecastRoutes.get('/top', async (req, res) => {
 
     // Store in database for persistence
     const today = getToday();
+    const nowTimestamp = new Date().toISOString();
     
     for (const resort of topResorts) {
       const id = resort.name.toLowerCase().replace(/\s+/g, '-');
@@ -139,12 +140,12 @@ forecastRoutes.get('/top', async (req, res) => {
           region: determineRegionFromState(resort.state),
           latitude: resort.latitude || 0,
           longitude: resort.longitude || 0,
-          updated_at: new Date().toISOString(),
+          updated_at: nowTimestamp,
         }, {
           onConflict: 'id',
         });
 
-      // Store forecast
+      // Store forecast with explicit fetched_at
       await supabase
         .from('forecasts')
         .upsert({
@@ -152,11 +153,13 @@ forecastRoutes.get('/top', async (req, res) => {
           forecast_date: today,
           predicted_snow: resort.predictedSnow,
           condition: resort.summary,
-          fetched_at: new Date().toISOString(),
+          fetched_at: nowTimestamp,  // Explicitly set to ensure cache timestamp is updated
         }, {
           onConflict: 'resort_id,forecast_date',
         });
     }
+    
+    console.log(`[Cache STORED] Saved ${topResorts.length} resorts to database for region: ${regionStr}`);
 
     res.json({
       region: regionStr,

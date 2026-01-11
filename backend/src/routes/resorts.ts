@@ -141,8 +141,9 @@ resortRoutes.get('/:id', async (req, res) => {
         onConflict: 'id',
       });
 
-    // Insert snow report
+    // Insert snow report with explicit created_at to ensure cache works properly
     const today = getToday();
+    const nowTimestamp = new Date().toISOString();
     await supabase
       .from('snow_reports')
       .upsert({
@@ -156,11 +157,12 @@ resortRoutes.get('/:id', async (req, res) => {
         conditions: freshData.conditions,
         data_source: 'gemini',
         raw_response: freshData,
+        created_at: nowTimestamp,  // Explicitly set to ensure cache timestamp is updated
       }, {
         onConflict: 'resort_id,report_date',
       });
 
-    // Insert forecasts
+    // Insert forecasts with explicit fetched_at
     if (freshData.forecast && Array.isArray(freshData.forecast)) {
       for (const day of freshData.forecast) {
         const forecastDate = parseDate(day.date);
@@ -176,12 +178,13 @@ resortRoutes.get('/:id', async (req, res) => {
               condition: day.condition,
               snow_probability: day.snowProbability,
               wind_speed: day.windSpeed,
-              fetched_at: new Date().toISOString(),
+              fetched_at: nowTimestamp,  // Use same timestamp for consistency
             }, {
               onConflict: 'resort_id,forecast_date',
             });
         }
       }
+      console.log(`[Cache STORED] Saved resort ${id} with ${freshData.forecast.length} forecast days`);
     }
 
     // Return fresh data

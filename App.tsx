@@ -9,18 +9,17 @@ import MapView from './components/MapView';
 import NotificationBell from './components/NotificationBell';
 
 const DEFAULT_POPULAR = [
-  "Vail",
-  "Aspen Snowmass",
-  "Jackson Hole",
-  "Park City",
-  "Mammoth Mountain"
+  "Crystal Mountain",
+  "Big Sky",
+  "Whistler",
+  "Copper Mountain"
 ];
 
 // Check if backend is available
 const USE_BACKEND = import.meta.env.VITE_API_URL || false;
 
 const App: React.FC = () => {
-  const [selectedResort, setSelectedResort] = useState<string>("Vail");
+  const [selectedResort, setSelectedResort] = useState<string>("Crystal Mountain");
   const [resortData, setResortData] = useState<ResortData | null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [searchQuery, setSearchQuery] = useState<string>("");
@@ -60,7 +59,7 @@ const App: React.FC = () => {
 
   // Load Top 5 Lists
   const loadTopList = useCallback(async (region: string) => {
-    // Check Cache first
+    // Check frontend cache first
     if (topListCache[region]) {
       setTopResorts(topListCache[region]);
       // Check for alerts
@@ -75,7 +74,7 @@ const App: React.FC = () => {
     setTopResorts([]); 
     
     try {
-      // Use backend API if available, otherwise fall back to Gemini direct
+      // Call backend API - backend will check its own database cache first
       const data = USE_BACKEND 
         ? await api.fetchTopResorts(region)
         : await fetchTopSnowfallRegions(region);
@@ -107,10 +106,11 @@ const App: React.FC = () => {
   const loadData = useCallback(async (name: string, forceRefresh = false) => {
     const cacheKey = name.toLowerCase().replace(/\s+/g, '-');
     
-    // Cache check - but also verify cached data has valid forecast
+    // Check frontend (browser) cache first - but only use if data has valid forecast
     const cachedData = dataCache[cacheKey];
     const hasValidCache = cachedData && cachedData.forecast && cachedData.forecast.length > 0;
     
+    // If we have valid frontend cache and not forcing refresh, use it
     if (!forceRefresh && hasValidCache) {
       setResortData(cachedData);
       return;
@@ -120,10 +120,11 @@ const App: React.FC = () => {
     if (!forceRefresh) setResortData(null); 
     
     try {
-      // Use backend API if available - always force refresh if cache was invalid
-      const needsRefresh = forceRefresh || !hasValidCache;
+      // Call backend API - let the BACKEND decide if it needs to fetch fresh data
+      // Only pass refresh=true when user explicitly requests it (clicks refresh button)
+      // The backend has its own 1-hour database cache that it will check first
       const data = USE_BACKEND 
-        ? await api.fetchResortData(cacheKey, needsRefresh)
+        ? await api.fetchResortData(cacheKey, forceRefresh)  // Only force when user clicks refresh
         : await fetchResortSnowData(name);
       
       setResortData(data);
@@ -210,7 +211,7 @@ const App: React.FC = () => {
       {/* Sticky Header */}
       <header className="sticky top-0 z-40 bg-white/80 backdrop-blur-md border-b border-slate-200 shadow-sm">
         <div className="max-w-5xl mx-auto px-4 h-16 flex items-center justify-between">
-          <div className="flex items-center gap-2 cursor-pointer" onClick={() => setSelectedResort("Vail")}>
+          <div className="flex items-center gap-2 cursor-pointer" onClick={() => setSelectedResort("Crystal Mountain")}>
             <div className="bg-gradient-to-br from-blue-600 to-indigo-600 p-2 rounded-xl text-white shadow-lg shadow-blue-500/25">
               <Mountain size={20} strokeWidth={2.5} />
             </div>
