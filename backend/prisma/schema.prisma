@@ -36,6 +36,7 @@ model Resort {
   snowReports     SnowReport[]
   forecasts       Forecast[]
   favorites       Favorite[]
+  alertSubscriptions AlertSubscription[]
   
   @@index([state])
   @@index([region])
@@ -166,6 +167,64 @@ model Alert {
   
   // Relations
   user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+// ============================================
+// SNOW ALERT SUBSCRIPTIONS
+// ============================================
+
+model AlertSubscription {
+  id            Int      @id @default(autoincrement())
+  
+  // For anonymous users, use a device/browser ID
+  visitorId     String   // Browser fingerprint or localStorage ID
+  email         String?  // Optional email for notifications
+  
+  resortId      String
+  resortName    String   // Store name for display purposes
+  
+  // Alert configuration
+  threshold     String   // 'light' (1-5"), 'good' (5-15"), 'great' (15-30")
+  timeframe     Int      @default(5) // 5 or 10 days
+  
+  // Status
+  isActive      Boolean  @default(true)
+  lastTriggered DateTime?
+  lastChecked   DateTime @default(now())
+  
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  
+  // Relations
+  resort        Resort   @relation(fields: [resortId], references: [id], onDelete: Cascade)
+  notifications AlertNotification[]
+  
+  @@unique([visitorId, resortId]) // One subscription per resort per visitor
+  @@index([visitorId])
+  @@index([resortId])
+  @@index([isActive])
+}
+
+model AlertNotification {
+  id              Int      @id @default(autoincrement())
+  subscriptionId  Int
+  
+  // Notification content
+  title           String
+  message         String
+  predictedSnow   Float
+  forecastDate    DateTime
+  
+  // Status
+  isRead          Boolean  @default(false)
+  
+  createdAt       DateTime @default(now())
+  
+  // Relations
+  subscription    AlertSubscription @relation(fields: [subscriptionId], references: [id], onDelete: Cascade)
+  
+  @@index([subscriptionId])
+  @@index([isRead])
 }
 
 // ============================================

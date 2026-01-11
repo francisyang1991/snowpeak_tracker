@@ -1,6 +1,4 @@
-import { PrismaClient } from '@prisma/client';
-
-const prisma = new PrismaClient();
+import { supabase } from './supabase.js';
 
 // Major US Ski Resorts with coordinates
 const SKI_RESORTS = [
@@ -105,19 +103,13 @@ const SKI_RESORTS = [
 ];
 
 async function seed() {
-  console.log('🌱 Starting database seed...');
+  console.log('🌱 Starting database seed with Supabase...');
   
   // Seed all resorts
   for (const resort of SKI_RESORTS) {
-    await prisma.resort.upsert({
-      where: { id: resort.id },
-      update: {
-        latitude: resort.lat,
-        longitude: resort.lng,
-        totalLifts: resort.lifts,
-        totalTrails: resort.trails,
-      },
-      create: {
+    const { error } = await supabase
+      .from('resorts')
+      .upsert({
         id: resort.id,
         name: resort.name,
         location: `${resort.state}, USA`,
@@ -125,11 +117,18 @@ async function seed() {
         region: resort.region,
         latitude: resort.lat,
         longitude: resort.lng,
-        totalLifts: resort.lifts,
-        totalTrails: resort.trails,
-      },
-    });
-    console.log(`  ✓ ${resort.name}`);
+        total_lifts: resort.lifts,
+        total_trails: resort.trails,
+        updated_at: new Date().toISOString(),
+      }, {
+        onConflict: 'id',
+      });
+    
+    if (error) {
+      console.error(`  ❌ ${resort.name}: ${error.message}`);
+    } else {
+      console.log(`  ✓ ${resort.name}`);
+    }
   }
 
   console.log(`\n✅ Seeded ${SKI_RESORTS.length} ski resorts`);
@@ -150,7 +149,4 @@ seed()
   .catch((e) => {
     console.error('❌ Seed error:', e);
     process.exit(1);
-  })
-  .finally(async () => {
-    await prisma.$disconnect();
   });

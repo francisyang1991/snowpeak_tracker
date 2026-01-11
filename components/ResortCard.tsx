@@ -1,7 +1,8 @@
-import React from 'react';
-import { Snowflake, MapPin, Heart, ExternalLink, Ticket, TrendingUp, Globe, RefreshCw, Mountain, Thermometer, Clock } from 'lucide-react';
+import React, { useState } from 'react';
+import { Snowflake, MapPin, Heart, ExternalLink, Ticket, TrendingUp, Globe, RefreshCw, Mountain, Thermometer, Clock, Bell, BellRing } from 'lucide-react';
 import { ResortData } from '../types';
 import SnowChart from './SnowChart';
+import AlertSubscriptionModal from './AlertSubscriptionModal';
 
 interface ResortCardProps {
   data: ResortData;
@@ -11,6 +12,9 @@ interface ResortCardProps {
 }
 
 const ResortCard: React.FC<ResortCardProps> = ({ data, isFavorite, onRefresh, onToggleFavorite }) => {
+  const [showAlertModal, setShowAlertModal] = useState(false);
+  const [hasAlert, setHasAlert] = useState(false);
+
   // Calculate powder score based on conditions
   const getPowderScore = () => {
     const recent = data.last24Hours + data.last48Hours / 2;
@@ -52,7 +56,7 @@ const ResortCard: React.FC<ResortCardProps> = ({ data, isFavorite, onRefresh, on
                 {condition.icon} {condition.label}
               </span>
             </div>
-            <div className="flex items-center gap-3">
+            <div className="flex items-center gap-2">
               <h2 className="text-2xl font-bold text-slate-900">{data.name}</h2>
               <button 
                 onClick={onToggleFavorite}
@@ -64,6 +68,17 @@ const ResortCard: React.FC<ResortCardProps> = ({ data, isFavorite, onRefresh, on
                 title={isFavorite ? "Remove from favorites" : "Add to favorites"}
               >
                 <Heart size={20} fill={isFavorite ? "currentColor" : "none"} />
+              </button>
+              <button 
+                onClick={() => setShowAlertModal(true)}
+                className={`p-2 rounded-full transition-all ${
+                  hasAlert 
+                    ? "bg-blue-50 text-blue-500 hover:bg-blue-100 shadow-sm" 
+                    : "bg-slate-50 text-slate-300 hover:bg-slate-100 hover:text-blue-400"
+                }`}
+                title="Set snow alert"
+              >
+                {hasAlert ? <BellRing size={20} /> : <Bell size={20} />}
               </button>
             </div>
           </div>
@@ -178,6 +193,15 @@ const ResortCard: React.FC<ResortCardProps> = ({ data, isFavorite, onRefresh, on
           </div>
         </div>
       </div>
+
+      {/* Alert Subscription Modal */}
+      <AlertSubscriptionModal
+        isOpen={showAlertModal}
+        onClose={() => setShowAlertModal(false)}
+        resortId={data.id || data.name.toLowerCase().replace(/\s+/g, '-')}
+        resortName={data.name}
+        onSubscribed={() => setHasAlert(true)}
+      />
     </div>
   );
 };

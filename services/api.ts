@@ -202,3 +202,163 @@ export async function checkApiHealth(): Promise<boolean> {
     return false;
   }
 }
+
+// ============================================
+// ALERT SUBSCRIPTION API
+// ============================================
+
+export interface AlertSubscription {
+  id: number;
+  resortId: string;
+  resortName: string;
+  threshold: 'light' | 'good' | 'great';
+  thresholdLabel: string;
+  timeframe: number;
+  isActive: boolean;
+  createdAt: string;
+  unreadNotifications: number;
+  notifications: AlertNotification[];
+}
+
+export interface AlertNotification {
+  id: number;
+  title: string;
+  message: string;
+  predictedSnow: number;
+  forecastDate: string;
+  resortId?: string;
+  resortName?: string;
+  isRead: boolean;
+  createdAt: string;
+}
+
+/**
+ * Get or create a visitor ID for anonymous users
+ */
+export function getVisitorId(): string {
+  const STORAGE_KEY = 'snowpeak_visitor_id';
+  let visitorId = localStorage.getItem(STORAGE_KEY);
+  
+  if (!visitorId) {
+    visitorId = 'visitor_' + Math.random().toString(36).substring(2, 15) + 
+                Math.random().toString(36).substring(2, 15);
+    localStorage.setItem(STORAGE_KEY, visitorId);
+  }
+  
+  return visitorId;
+}
+
+/**
+ * Subscribe to snow alerts for a resort
+ */
+export async function subscribeToAlert(params: {
+  resortId: string;
+  resortName: string;
+  threshold: 'light' | 'good' | 'great';
+  timeframe: 5 | 10;
+  email?: string;
+}): Promise<{ subscription: AlertSubscription; immediateAlert: boolean }> {
+  const visitorId = getVisitorId();
+  
+  const response = await fetch(`${API_BASE}/alerts/subscribe`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      visitorId,
+      ...params,
+    }),
+  });
+  
+  if (!response.ok) {
+    throw new Error(`Failed to subscribe: ${response.statusText}`);
+  }
+  
+  return response.json();
+}
+
+/**
+ * Get all alert subscriptions for the current visitor
+ */
+export async function getMyAlerts(): Promise<AlertSubscription[]> {
+  const visitorId = getVisitorId();
+  const url = `${API_BASE}/alerts/my?visitorId=${visitorId}`;
+  
+  const response = await fetch(url);
+  
+  if (!response.ok) {
+    throw new Error(`Failed to fetch alerts: ${response.statusText}`);
+  }
+  
+  const data = await response.json();
+  return data.subscriptions || [];
+}
+
+/**
+ * Unsubscribe from an alert
+ */
+export async function unsubscribeAlert(alertId: number): Promise<void> {
+  const visitorId = getVisitorId();
+  
+  const response = await fetch(`${API_BASE}/alerts/${alertId}?visitorId=${visitorId}`, {
+    method: 'DELETE',
+  });
+  
+  if (!response.ok) {
+    throw new Error(`Failed to unsubscribe: ${response.statusText}`);
+  }
+}
+
+/**
+ * Get all notifications for the current visitor
+ */
+export async function getNotifications(includeRead = false): Promise<AlertNotification[]> {
+  const visitorId = getVisitorId();
+  const url = `${API_BASE}/alerts/notifications?visitorId=${visitorId}&includeRead=${includeRead}`;
+  
+  const response = await fetch(url);
+  
+  if (!response.ok) {
+    throw new Error(`Failed to fetch notifications: ${response.statusText}`);
+  }
+  
+  const data = await response.json();
+  return data.notifications || [];
+}
+
+/**
+ * Mark a notification as read
+ */
+export async function markNotificationRead(notificationId: number): Promise<void> {
+  const response = await fetch(`${API_BASE}/alerts/notifications/${notificationId}/read`, {
+    method: 'POST',
+  });
+  
+  if (!response.ok) {
+    throw new Error(`Failed to mark as read: ${response.statusText}`);
+  }
+}
+
+/**
+ * Mark all notifications as read
+ */
+export async function markAllNotificationsRead(): Promise<void> {
+  const visitorId = getVisitorId();
+  
+  const response = await fetch(`${API_BASE}/alerts/notifications/read-all`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ visitorId }),
+  });
+  
+  if (!response.ok) {
+    throw new Error(`Failed to mark all as read: ${response.statusText}`);
+  }
+}
+
+/**
+ * Check if user is subscribed to a specific resort
+ */
+export async function isSubscribedToResort(resortId: string): Promise<AlertSubscription | null> {
+  const alerts = await getMyAlerts();
+  return alerts.find(a => a.resortId === resortId) || null;
+}
