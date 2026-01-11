@@ -19,6 +19,16 @@ const REGIONS = [
   { id: 'VT', label: 'VT' },
 ];
 
+// Get color class based on 5-DAY TOTAL snow amount
+// (Different scale than daily because it's cumulative over 5 days)
+function getSnowColorClass5Day(inches: number): string {
+  if (inches >= 60) return 'text-red-600 bg-red-100';       // 60+"  - Epic/Heavy (12"+ per day avg)
+  if (inches >= 30) return 'text-purple-600 bg-purple-100'; // 30-60" - Great snow (6-12" per day avg)
+  if (inches >= 15) return 'text-blue-600 bg-blue-100';     // 15-30" - Good snow (3-6" per day avg)
+  if (inches >= 5) return 'text-cyan-600 bg-cyan-50';       // 5-15"  - Light snow (1-3" per day avg)
+  return 'text-slate-500 bg-slate-100';                      // <5"   - Minimal
+}
+
 const TopSnowList: React.FC<TopSnowListProps> = ({ 
   data, 
   isLoading, 
@@ -95,29 +105,35 @@ const TopSnowList: React.FC<TopSnowListProps> = ({
                   }`}>
                     {idx + 1}
                   </span>
-                  <div className="min-w-0">
-                    <div className="font-medium text-slate-800 text-sm leading-tight mb-0.5 truncate max-w-[120px] sm:max-w-[160px]">
+                  <div className="min-w-0 flex-1">
+                    <div className="font-medium text-slate-800 text-sm leading-tight mb-0.5 truncate" title={item.name}>
                       {item.name}
                     </div>
-                    <div className="text-[11px] text-slate-500 truncate max-w-[100px] sm:max-w-[140px]">
+                    <div className="text-[11px] text-slate-500 truncate" title={item.location}>
                       {item.location}
                     </div>
                   </div>
                 </div>
                 
                 <div className="flex items-center gap-1.5 flex-shrink-0">
-                  {/* Snow intensity bar */}
-                  <div className="hidden sm:block w-20 h-2 bg-slate-100 rounded-full overflow-hidden">
+                  {/* Snow intensity bar with dynamic color (5-day total scale) */}
+                  <div className="hidden sm:block w-16 h-2 bg-slate-100 rounded-full overflow-hidden">
                     <div 
-                      className="h-full bg-gradient-to-r from-blue-400 to-indigo-500 rounded-full transition-all duration-300"
+                      className={`h-full rounded-full transition-all duration-300 ${
+                        item.predictedSnow >= 60 ? 'bg-gradient-to-r from-red-400 to-red-600' :
+                        item.predictedSnow >= 30 ? 'bg-gradient-to-r from-purple-400 to-purple-600' :
+                        item.predictedSnow >= 15 ? 'bg-gradient-to-r from-blue-400 to-blue-600' :
+                        item.predictedSnow >= 5 ? 'bg-gradient-to-r from-cyan-400 to-cyan-500' :
+                        'bg-gradient-to-r from-slate-300 to-slate-400'
+                      }`}
                       style={{ width: `${Math.max(intensity * 100, 10)}%` }}
                     />
                   </div>
                   
-                  {/* Snow amount */}
-                  <div className="flex items-center gap-0.5 min-w-[52px] justify-end">
-                    <Snowflake size={10} className="text-blue-500 flex-shrink-0" />
-                    <span className="text-sm font-bold text-indigo-600 tabular-nums">{item.predictedSnow}"</span>
+                  {/* Snow amount with color coding (5-day total scale) */}
+                  <div className={`flex items-center gap-0.5 min-w-[56px] justify-end px-1.5 py-0.5 rounded-md ${getSnowColorClass5Day(item.predictedSnow)}`}>
+                    <Snowflake size={10} className="flex-shrink-0" />
+                    <span className="text-sm font-bold tabular-nums">{item.predictedSnow}"</span>
                   </div>
                   
                   <ChevronRight size={14} className="text-slate-300 group-hover:text-blue-500 group-hover:translate-x-1 transition-all flex-shrink-0" />
@@ -138,10 +154,10 @@ const TopSnowList: React.FC<TopSnowListProps> = ({
       {/* Legend */}
       {data.length > 0 && (
         <div className="mt-4 pt-3 border-t border-slate-100 flex items-center justify-between text-[10px] text-slate-400">
-          <span>Updated every 30 min</span>
+          <span>Cached for 1 hour</span>
           <div className="flex items-center gap-2">
             <TrendingUp size={10} />
-            <span>Predicted total for next 5 days</span>
+            <span>5-day total snowfall</span>
           </div>
         </div>
       )}

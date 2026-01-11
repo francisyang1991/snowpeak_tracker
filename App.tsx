@@ -6,6 +6,7 @@ import * as api from './services/api';
 import ResortCard from './components/ResortCard';
 import TopSnowList from './components/TopSnowList';
 import MapView from './components/MapView';
+import NotificationBell from './components/NotificationBell';
 
 const DEFAULT_POPULAR = [
   "Vail",
@@ -221,7 +222,7 @@ const App: React.FC = () => {
             </div>
           </div>
           
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-2">
             <form onSubmit={handleSearchSubmit} className="relative w-full max-w-xs sm:max-w-sm">
               <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
                 <Search size={16} className="text-slate-400" />
@@ -235,10 +236,20 @@ const App: React.FC = () => {
               />
             </form>
             
-            {/* Map Button */}
+            {/* Notification Bell */}
+            <NotificationBell 
+              onSelectResort={(name) => {
+                setSelectedResort(name);
+                window.scrollTo({ top: 0, behavior: 'smooth' });
+              }}
+            />
+            
+            {/* Map Button - Temporarily disabled */}
             <button
-              onClick={() => setShowMap(true)}
-              className="flex items-center gap-2 px-3 py-2 bg-gradient-to-r from-indigo-600 to-blue-600 text-white text-sm font-medium rounded-xl hover:from-indigo-700 hover:to-blue-700 transition-all shadow-lg shadow-indigo-500/25"
+              onClick={() => {}}
+              disabled
+              className="flex items-center gap-2 px-3 py-2 bg-slate-300 text-slate-500 text-sm font-medium rounded-xl cursor-not-allowed opacity-60"
+              title="Coming soon - Snow Map feature is under development"
             >
               <Map size={16} />
               <span className="hidden sm:inline">Snow Map</span>

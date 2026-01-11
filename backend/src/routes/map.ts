@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import prisma from '../db/client.js';
+import { supabase, getToday } from '../db/supabase.js';
 import { geminiService } from '../services/gemini.js';
 
 export const mapRoutes = Router();
@@ -52,43 +52,47 @@ mapRoutes.get('/resorts', async (req, res) => {
       });
     }
 
-    // Try to get from database first
-    const dbResorts = await prisma.resort.findMany({
-      where: {
-        latitude: { not: 0 },
-        longitude: { not: 0 },
-      },
-      include: {
-        snowReports: {
-          orderBy: { reportDate: 'desc' },
-          take: 1,
-        },
-        forecasts: {
-          where: {
-            forecastDate: { gte: new Date() },
-          },
-          orderBy: { forecastDate: 'asc' },
-          take: 5,
-        },
-      },
-    });
+    // Get resorts with coordinates from database
+    const { data: dbResorts, error } = await supabase
+      .from('resorts')
+      .select('*')
+      .neq('latitude', 0)
+      .neq('longitude', 0);
 
-    if (dbResorts.length > 20) {
-      // Use database data
-      const mapData = dbResorts.map(resort => ({
-        id: resort.id,
-        name: resort.name,
-        state: resort.state,
-        region: resort.region,
-        latitude: resort.latitude,
-        longitude: resort.longitude,
-        currentBase: resort.snowReports[0]?.baseDepth || 0,
-        snow24h: resort.forecasts[0]?.predictedSnow || 0,
-        snow48h: resort.forecasts.slice(0, 2).reduce((sum, f) => sum + f.predictedSnow, 0),
-        snow5day: resort.forecasts.reduce((sum, f) => sum + f.predictedSnow, 0),
-        liftsOpen: resort.snowReports[0]?.liftsOpen || 0,
-        totalLifts: resort.totalLifts,
-      }));
+    if (!error && dbResorts && dbResorts.length > 20) {
+      // Get forecasts for all resorts
+      const today = getToday();
+      const { data: forecasts } = await supabase
+        .from('forecasts')
+        .select('*')
+        .gte('forecast_date', today);
+
+      // Get latest snow reports
+      const { data: snowReports } = await supabase
+        .from('snow_reports')
+        .select('*')
+        .order('created_at', { ascending: false });
+
+      // Build map data
+      const mapData = dbResorts.map((resort: any) => {
+        const resortForecasts = forecasts?.filter((f: any) => f.resort_id === resort.id) || [];
+        const latestReport = snowReports?.find((r: any) => r.resort_id === resort.id);
+        
+        return {
+          id: resort.id,
+          name: resort.name,
+          state: resort.state,
+          region: resort.region,
+          latitude: resort.latitude,
+          longitude: resort.longitude,
+          currentBase: latestReport?.base_depth || 0,
+          snow24h: resortForecasts[0]?.predicted_snow || 0,
+          snow48h: resortForecasts.slice(0, 2).reduce((sum: number, f: any) => sum + f.predicted_snow, 0),
+          snow5day: resortForecasts.slice(0, 5).reduce((sum: number, f: any) => sum + f.predicted_snow, 0),
+          liftsOpen: latestReport?.lifts_open || 0,
+          totalLifts: resort.total_lifts,
+        };
+      });
 
       mapDataCache.data = mapData;
       mapDataCache.timestamp = now;
@@ -109,14 +113,9 @@ mapRoutes.get('/resorts', async (req, res) => {
       const id = resort.name.toLowerCase().replace(/\s+/g, '-');
       
       if (resort.latitude && resort.longitude) {
-        await prisma.resort.upsert({
-          where: { id },
-          update: {
-            latitude: resort.latitude,
-            longitude: resort.longitude,
-            updatedAt: new Date(),
-          },
-          create: {
+        await supabase
+          .from('resorts')
+          .upsert({
             id,
             name: resort.name,
             location: `${resort.state}, USA`,
@@ -124,8 +123,10 @@ mapRoutes.get('/resorts', async (req, res) => {
             region: determineRegionFromState(resort.state),
             latitude: resort.latitude,
             longitude: resort.longitude,
-          },
-        });
+            updated_at: new Date().toISOString(),
+          }, {
+            onConflict: 'id',
+          });
       }
     }
 
@@ -164,35 +165,37 @@ mapRoutes.get('/resorts', async (req, res) => {
 mapRoutes.get('/heatmap', async (req, res) => {
   try {
     const { metric = 'snow48h' } = req.query;
+    const today = getToday();
     
-    const resorts = await prisma.resort.findMany({
-      where: {
-        latitude: { not: 0 },
-        longitude: { not: 0 },
-      },
-      include: {
-        forecasts: {
-          where: {
-            forecastDate: { gte: new Date() },
-          },
-          orderBy: { forecastDate: 'asc' },
-          take: 5,
-        },
-      },
-    });
+    // Get resorts with forecasts
+    const { data: resorts, error } = await supabase
+      .from('resorts')
+      .select('*')
+      .neq('latitude', 0)
+      .neq('longitude', 0);
 
-    const heatmapData = resorts.map(resort => {
+    if (error) throw error;
+
+    // Get forecasts
+    const { data: forecasts } = await supabase
+      .from('forecasts')
+      .select('*')
+      .gte('forecast_date', today)
+      .order('forecast_date', { ascending: true });
+
+    const heatmapData = (resorts || []).map((resort: any) => {
+      const resortForecasts = forecasts?.filter((f: any) => f.resort_id === resort.id) || [];
       let value = 0;
       
       switch (metric) {
         case 'snow24h':
-          value = resort.forecasts[0]?.predictedSnow || 0;
+          value = resortForecasts[0]?.predicted_snow || 0;
           break;
         case 'snow48h':
-          value = resort.forecasts.slice(0, 2).reduce((sum, f) => sum + f.predictedSnow, 0);
+          value = resortForecasts.slice(0, 2).reduce((sum: number, f: any) => sum + f.predicted_snow, 0);
           break;
         case 'snow5day':
-          value = resort.forecasts.reduce((sum, f) => sum + f.predictedSnow, 0);
+          value = resortForecasts.slice(0, 5).reduce((sum: number, f: any) => sum + f.predicted_snow, 0);
           break;
       }
 
@@ -202,7 +205,7 @@ mapRoutes.get('/heatmap', async (req, res) => {
         value,
         name: resort.name,
       };
-    }).filter(d => d.value > 0);
+    }).filter((d: any) => d.value > 0);
 
     res.json({
       metric,
@@ -222,41 +225,40 @@ mapRoutes.get('/heatmap', async (req, res) => {
 mapRoutes.get('/regions', async (req, res) => {
   try {
     const regions = ['Rockies', 'Pacific', 'Northeast', 'Midwest'];
+    const today = getToday();
     
-    const regionData = await Promise.all(
-      regions.map(async (region) => {
-        const resorts = await prisma.resort.findMany({
-          where: { region },
-          include: {
-            forecasts: {
-              where: {
-                forecastDate: { gte: new Date() },
-              },
-              take: 2,
-            },
-          },
-        });
+    // Get all resorts and forecasts at once
+    const { data: allResorts } = await supabase
+      .from('resorts')
+      .select('*');
 
-        const total48h = resorts.reduce((sum, r) => {
-          const snow = r.forecasts.reduce((s, f) => s + f.predictedSnow, 0);
-          return sum + snow;
-        }, 0);
+    const { data: allForecasts } = await supabase
+      .from('forecasts')
+      .select('*')
+      .gte('forecast_date', today)
+      .order('forecast_date', { ascending: true });
 
-        return {
-          region,
-          resortCount: resorts.length,
-          averageSnow48h: resorts.length > 0 
-            ? Math.round(total48h / resorts.length * 10) / 10 
-            : 0,
-          topResort: resorts
-            .map(r => ({
-              name: r.name,
-              snow: r.forecasts.reduce((s, f) => s + f.predictedSnow, 0),
-            }))
-            .sort((a, b) => b.snow - a.snow)[0]?.name || null,
-        };
-      })
-    );
+    const regionData = regions.map(region => {
+      const resorts = allResorts?.filter((r: any) => r.region === region) || [];
+      
+      const resortsWithSnow = resorts.map((resort: any) => {
+        const forecasts = allForecasts?.filter((f: any) => f.resort_id === resort.id).slice(0, 2) || [];
+        const snow48h = forecasts.reduce((sum: number, f: any) => sum + f.predicted_snow, 0);
+        return { name: resort.name, snow: snow48h };
+      });
+
+      const totalSnow = resortsWithSnow.reduce((sum: number, r: any) => sum + r.snow, 0);
+      const topResort = resortsWithSnow.sort((a: any, b: any) => b.snow - a.snow)[0];
+
+      return {
+        region,
+        resortCount: resorts.length,
+        averageSnow48h: resorts.length > 0 
+          ? Math.round(totalSnow / resorts.length * 10) / 10 
+          : 0,
+        topResort: topResort?.name || null,
+      };
+    });
 
     res.json({
       regions: regionData,
