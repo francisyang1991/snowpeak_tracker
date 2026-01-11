@@ -1,0 +1,184 @@
+// Prisma Schema for SnowPeak Tracker
+// Database: PostgreSQL
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================
+// RESORT DATA
+// ============================================
+
+model Resort {
+  id              String   @id // slug: 'vail', 'jackson-hole'
+  name            String
+  location        String   // "Colorado, USA"
+  state           String   // "CO"
+  region          String   // "Rockies", "Pacific", "Northeast"
+  latitude        Float
+  longitude       Float
+  websiteUrl      String?
+  totalLifts      Int      @default(0)
+  totalTrails     Int      @default(0)
+  verticalDrop    Int?     // feet
+  baseElevation   Int?     // feet
+  summitElevation Int?     // feet
+  
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  
+  // Relations
+  snowReports     SnowReport[]
+  forecasts       Forecast[]
+  favorites       Favorite[]
+  
+  @@index([state])
+  @@index([region])
+}
+
+// ============================================
+// SNOW DATA
+// ============================================
+
+model SnowReport {
+  id            Int      @id @default(autoincrement())
+  resortId      String
+  reportDate    DateTime @db.Date
+  
+  // Snow metrics (inches)
+  baseDepth     Int      @default(0)
+  last24Hours   Int      @default(0)
+  last48Hours   Int      @default(0)
+  last7Days     Int      @default(0)
+  seasonTotal   Int?
+  
+  // Operations
+  liftsOpen     Int      @default(0)
+  trailsOpen    Int      @default(0)
+  
+  // Conditions
+  conditions    String?  // "Powder", "Packed Powder", "Groomed"
+  snowQuality   Int?     // 0-100 score
+  
+  // Metadata
+  dataSource    String   @default("gemini") // 'gemini', 'official', 'manual'
+  rawResponse   Json?    // Store full AI response for debugging
+  
+  createdAt     DateTime @default(now())
+  
+  // Relations
+  resort        Resort   @relation(fields: [resortId], references: [id], onDelete: Cascade)
+  
+  @@unique([resortId, reportDate])
+  @@index([reportDate])
+}
+
+model Forecast {
+  id              Int      @id @default(autoincrement())
+  resortId        String
+  forecastDate    DateTime @db.Date
+  
+  // Predictions
+  predictedSnow   Float    @default(0) // inches
+  tempHigh        Int?     // Fahrenheit
+  tempLow         Int?     // Fahrenheit
+  condition       String?  // "Heavy Snow", "Light Snow", "Cloudy"
+  
+  // Additional metrics
+  snowProbability Int?     // 0-100%
+  windSpeed       Int?     // mph
+  humidity        Int?     // 0-100%
+  
+  // Quality prediction
+  powderScore     Int?     // 0-100, likelihood of good powder
+  
+  // Metadata
+  fetchedAt       DateTime @default(now())
+  
+  // Relations
+  resort          Resort   @relation(fields: [resortId], references: [id], onDelete: Cascade)
+  
+  @@unique([resortId, forecastDate])
+  @@index([forecastDate])
+  @@index([predictedSnow])
+}
+
+// ============================================
+// USER DATA (Future)
+// ============================================
+
+model User {
+  id            String   @id @default(cuid())
+  email         String   @unique
+  name          String?
+  
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  
+  // Relations
+  favorites     Favorite[]
+  chatHistory   ChatMessage[]
+  alerts        Alert[]
+}
+
+model Favorite {
+  id        Int      @id @default(autoincrement())
+  userId    String
+  resortId  String
+  
+  createdAt DateTime @default(now())
+  
+  // Relations
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  resort    Resort   @relation(fields: [resortId], references: [id], onDelete: Cascade)
+  
+  @@unique([userId, resortId])
+}
+
+model ChatMessage {
+  id        Int      @id @default(autoincrement())
+  userId    String
+  question  String
+  answer    String?
+  
+  createdAt DateTime @default(now())
+  
+  // Relations
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model Alert {
+  id            Int      @id @default(autoincrement())
+  userId        String
+  resortId      String?  // null = all resorts
+  
+  alertType     String   // 'powder_day', 'storm', 'threshold'
+  threshold     Int?     // minimum inches to trigger
+  
+  isActive      Boolean  @default(true)
+  
+  createdAt     DateTime @default(now())
+  
+  // Relations
+  user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+// ============================================
+// ANALYTICS (Future)
+// ============================================
+
+model SearchLog {
+  id          Int      @id @default(autoincrement())
+  query       String
+  resortId    String?
+  userAgent   String?
+  
+  searchedAt  DateTime @default(now())
+  
+  @@index([searchedAt])
+}
