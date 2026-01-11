@@ -1,21 +1,29 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { Search, Mountain, Loader2, Star, Bot, Sparkles, Send } from 'lucide-react';
+import { Search, Mountain, Loader2, Star, Bot, Sparkles, Send, Map, AlertTriangle, TrendingUp } from 'lucide-react';
 import { ResortData, TopResort } from './types';
 import { fetchResortSnowData, fetchTopSnowfallRegions, askSkiAssistant } from './services/geminiService';
+import * as api from './services/api';
 import ResortCard from './components/ResortCard';
 import TopSnowList from './components/TopSnowList';
+import MapView from './components/MapView';
 
 const DEFAULT_POPULAR = [
   "Vail",
   "Aspen Snowmass",
-  "Jackson Hole"
+  "Jackson Hole",
+  "Park City",
+  "Mammoth Mountain"
 ];
+
+// Check if backend is available
+const USE_BACKEND = import.meta.env.VITE_API_URL || false;
 
 const App: React.FC = () => {
   const [selectedResort, setSelectedResort] = useState<string>("Vail");
   const [resortData, setResortData] = useState<ResortData | null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [searchQuery, setSearchQuery] = useState<string>("");
+  const [showMap, setShowMap] = useState<boolean>(false);
   
   // Favorites State with LocalStorage
   const [favorites, setFavorites] = useState<string[]>(() => {
@@ -41,6 +49,9 @@ const App: React.FC = () => {
   const [dataCache, setDataCache] = useState<Record<string, ResortData>>({});
   const [topListCache, setTopListCache] = useState<Record<string, TopResort[]>>({});
 
+  // Alert banner
+  const [snowAlert, setSnowAlert] = useState<{ resort: string; snow: number } | null>(null);
+
   // Save favorites when changed
   useEffect(() => {
     localStorage.setItem('snowPeakFavorites', JSON.stringify(favorites));
@@ -51,18 +62,30 @@ const App: React.FC = () => {
     // Check Cache first
     if (topListCache[region]) {
       setTopResorts(topListCache[region]);
+      // Check for alerts
+      const top = topListCache[region][0];
+      if (top && top.predictedSnow >= 18) {
+        setSnowAlert({ resort: top.name, snow: top.predictedSnow });
+      }
       return;
     }
 
     setIsTopLoading(true);
-    // Optimistic UI: Don't clear old data immediately if we are just switching tabs, 
-    // but here we want to show loading state for the specific new region
     setTopResorts([]); 
     
     try {
-      const data = await fetchTopSnowfallRegions(region);
+      // Use backend API if available, otherwise fall back to Gemini direct
+      const data = USE_BACKEND 
+        ? await api.fetchTopResorts(region)
+        : await fetchTopSnowfallRegions(region);
+      
       setTopResorts(data);
       setTopListCache(prev => ({ ...prev, [region]: data }));
+      
+      // Check for alerts
+      if (data[0] && data[0].predictedSnow >= 18) {
+        setSnowAlert({ resort: data[0].name, snow: data[0].predictedSnow });
+      }
     } catch (e) {
       console.error("Failed to load top list", e);
     } finally {
@@ -81,21 +104,29 @@ const App: React.FC = () => {
   };
 
   const loadData = useCallback(async (name: string, forceRefresh = false) => {
-    // Cache check
-    if (!forceRefresh && dataCache[name.toLowerCase()]) {
-      setResortData(dataCache[name.toLowerCase()]);
+    const cacheKey = name.toLowerCase().replace(/\s+/g, '-');
+    
+    // Cache check - but also verify cached data has valid forecast
+    const cachedData = dataCache[cacheKey];
+    const hasValidCache = cachedData && cachedData.forecast && cachedData.forecast.length > 0;
+    
+    if (!forceRefresh && hasValidCache) {
+      setResortData(cachedData);
       return;
     }
 
     setIsLoading(true);
-    // Only clear data if not a refresh, to prevent flash
     if (!forceRefresh) setResortData(null); 
     
     try {
-      const data = await fetchResortSnowData(name);
+      // Use backend API if available - always force refresh if cache was invalid
+      const needsRefresh = forceRefresh || !hasValidCache;
+      const data = USE_BACKEND 
+        ? await api.fetchResortData(cacheKey, needsRefresh)
+        : await fetchResortSnowData(name);
+      
       setResortData(data);
-      // Update Cache
-      setDataCache(prev => ({ ...prev, [name.toLowerCase()]: data }));
+      setDataCache(prev => ({ ...prev, [cacheKey]: data }));
     } catch (e) {
       console.error("Failed to load data", e);
     } finally {
@@ -131,58 +162,144 @@ const App: React.FC = () => {
     if (!chatQuery.trim()) return;
     
     setIsChatLoading(true);
-    setChatResponse(""); // Clear previous response
+    setChatResponse("");
     
-    const response = await askSkiAssistant(chatQuery);
-    setChatResponse(response);
+    try {
+      const response = USE_BACKEND
+        ? await api.askSkiAssistant(chatQuery)
+        : await askSkiAssistant(chatQuery);
+      setChatResponse(response);
+    } catch (e) {
+      setChatResponse("Sorry, I couldn't process your question. Please try again.");
+    }
     setIsChatLoading(false);
+  };
+
+  const handleMapResortSelect = (resortId: string) => {
+    const resortName = resortId.replace(/-/g, ' ');
+    setSelectedResort(resortName);
+    setShowMap(false);
   };
 
   const isCurrentFavorite = favorites.includes(resortData?.name || selectedResort);
 
+  // Calculate total predicted snow for next 5 days
+  const totalForecastSnow = resortData?.forecast
+    ?.slice(0, 5)
+    .reduce((sum, day) => sum + day.snowInches, 0) || 0;
+
   return (
-    <div className="min-h-screen bg-[#f8fafc] text-slate-900 pb-12">
+    <div className="min-h-screen bg-gradient-to-br from-slate-50 via-blue-50/30 to-slate-100 text-slate-900 pb-12">
+      {/* Snow Alert Banner */}
+      {snowAlert && snowAlert.snow >= 24 && (
+        <div className="bg-gradient-to-r from-blue-600 to-indigo-600 text-white py-2 px-4 text-center text-sm font-medium">
+          <span className="inline-flex items-center gap-2">
+            <AlertTriangle size={16} />
+            🌨️ POWDER ALERT: {snowAlert.resort} expecting {snowAlert.snow}" in the next 5 days!
+            <button 
+              onClick={() => setSnowAlert(null)} 
+              className="ml-2 opacity-70 hover:opacity-100"
+            >
+              ✕
+            </button>
+          </span>
+        </div>
+      )}
+
       {/* Sticky Header */}
-      <header className="sticky top-0 z-50 bg-white/80 backdrop-blur-md border-b border-slate-200 shadow-sm">
-        <div className="max-w-4xl mx-auto px-4 h-16 flex items-center justify-between">
+      <header className="sticky top-0 z-40 bg-white/80 backdrop-blur-md border-b border-slate-200 shadow-sm">
+        <div className="max-w-5xl mx-auto px-4 h-16 flex items-center justify-between">
           <div className="flex items-center gap-2 cursor-pointer" onClick={() => setSelectedResort("Vail")}>
-            <div className="bg-blue-600 p-2 rounded-xl text-white">
+            <div className="bg-gradient-to-br from-blue-600 to-indigo-600 p-2 rounded-xl text-white shadow-lg shadow-blue-500/25">
               <Mountain size={20} strokeWidth={2.5} />
             </div>
-            <h1 className="text-lg font-bold tracking-tight text-slate-900 hidden sm:block">
-              SnowPeak <span className="text-blue-600">Tracker</span>
-            </h1>
+            <div className="hidden sm:block">
+              <h1 className="text-lg font-bold tracking-tight text-slate-900">
+                SnowPeak <span className="text-transparent bg-clip-text bg-gradient-to-r from-blue-600 to-indigo-600">Tracker</span>
+              </h1>
+              <p className="text-[10px] text-slate-400 -mt-0.5">FREE Snow Forecasts</p>
+            </div>
           </div>
           
-          <form onSubmit={handleSearchSubmit} className="relative w-full max-w-xs sm:max-w-sm ml-4">
-            <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
-              <Search size={16} className="text-slate-400" />
-            </div>
-            <input
-              type="text"
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder="搜索滑雪场..."
-              className="block w-full pl-10 pr-4 py-2 bg-slate-100 border-none rounded-full text-sm focus:ring-2 focus:ring-blue-500 focus:bg-white transition-all placeholder:text-slate-400"
-            />
-          </form>
+          <div className="flex items-center gap-3">
+            <form onSubmit={handleSearchSubmit} className="relative w-full max-w-xs sm:max-w-sm">
+              <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
+                <Search size={16} className="text-slate-400" />
+              </div>
+              <input
+                type="text"
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                placeholder="Search ski resort..."
+                className="block w-full pl-10 pr-4 py-2 bg-slate-100 border-none rounded-full text-sm focus:ring-2 focus:ring-blue-500 focus:bg-white transition-all placeholder:text-slate-400"
+              />
+            </form>
+            
+            {/* Map Button */}
+            <button
+              onClick={() => setShowMap(true)}
+              className="flex items-center gap-2 px-3 py-2 bg-gradient-to-r from-indigo-600 to-blue-600 text-white text-sm font-medium rounded-xl hover:from-indigo-700 hover:to-blue-700 transition-all shadow-lg shadow-indigo-500/25"
+            >
+              <Map size={16} />
+              <span className="hidden sm:inline">Snow Map</span>
+            </button>
+          </div>
         </div>
       </header>
 
-      <main className="max-w-4xl mx-auto px-4 pt-6">
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+      {/* Map Modal */}
+      {showMap && (
+        <MapView 
+          onSelectResort={handleMapResortSelect}
+          onClose={() => setShowMap(false)}
+        />
+      )}
+
+      <main className="max-w-5xl mx-auto px-4 pt-6">
+        {/* Quick Stats Banner */}
+        {resortData && totalForecastSnow > 0 && (
+          <div className="mb-6 p-4 bg-gradient-to-r from-blue-500/10 via-indigo-500/10 to-purple-500/10 rounded-2xl border border-blue-200/50 backdrop-blur-sm">
+            <div className="flex items-center justify-between flex-wrap gap-4">
+              <div className="flex items-center gap-3">
+                <div className="p-2 bg-blue-500/20 rounded-xl">
+                  <TrendingUp size={20} className="text-blue-600" />
+                </div>
+                <div>
+                  <p className="text-xs text-slate-500 uppercase font-medium">5-Day Snow Forecast</p>
+                  <p className="text-2xl font-bold text-slate-900">{totalForecastSnow}" <span className="text-sm font-normal text-slate-500">total</span></p>
+                </div>
+              </div>
+              <div className="flex gap-6 text-center">
+                <div>
+                  <p className="text-xs text-slate-500">24hr</p>
+                  <p className="text-lg font-bold text-cyan-600">{resortData.last24Hours}"</p>
+                </div>
+                <div>
+                  <p className="text-xs text-slate-500">Base</p>
+                  <p className="text-lg font-bold text-blue-600">{resortData.baseDepth}"</p>
+                </div>
+                <div>
+                  <p className="text-xs text-slate-500">Lifts</p>
+                  <p className="text-lg font-bold text-indigo-600">{resortData.liftsOpen}/{resortData.totalLifts}</p>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
           
           {/* Left Column: Sidebar (Favorites & Top List) */}
-          <div className="md:col-span-1 space-y-6">
+          <div className="lg:col-span-1 space-y-6">
              {/* Favorites List */}
             <div>
               <div className="flex items-center gap-2 mb-3 px-1">
                 <Star size={14} className="text-amber-500 fill-amber-500" />
-                <h3 className="text-xs font-semibold text-slate-500 uppercase tracking-wider">我的收藏</h3>
+                <h3 className="text-xs font-semibold text-slate-500 uppercase tracking-wider">My Favorites</h3>
               </div>
-              <div className="flex gap-2 overflow-x-auto pb-2 no-scrollbar md:flex-col md:overflow-visible">
+              <div className="flex gap-2 overflow-x-auto pb-2 no-scrollbar lg:flex-col lg:overflow-visible">
                 {favorites.length === 0 && (
-                   <div className="text-sm text-slate-400 italic px-2">暂无收藏</div>
+                   <div className="text-sm text-slate-400 italic px-2">No favorites yet</div>
                 )}
                 {favorites.map((resort) => (
                   <button
@@ -192,10 +309,10 @@ const App: React.FC = () => {
                       setSelectedResort(resort);
                       window.scrollTo({ top: 0, behavior: 'smooth' });
                     }}
-                    className={`flex-shrink-0 px-4 py-2.5 rounded-xl text-sm font-medium transition-all text-left w-auto md:w-full ${
+                    className={`flex-shrink-0 px-4 py-2.5 rounded-xl text-sm font-medium transition-all text-left w-auto lg:w-full ${
                       selectedResort.toLowerCase() === resort.toLowerCase()
-                        ? 'bg-blue-600 text-white shadow-md'
-                        : 'bg-white text-slate-600 border border-slate-200 hover:border-blue-300 hover:text-blue-600'
+                        ? 'bg-gradient-to-r from-blue-600 to-indigo-600 text-white shadow-lg shadow-blue-500/25'
+                        : 'bg-white text-slate-600 border border-slate-200 hover:border-blue-300 hover:text-blue-600 hover:shadow-md'
                     }`}
                   >
                     {resort}
@@ -205,7 +322,7 @@ const App: React.FC = () => {
             </div>
 
             {/* Top 5 List Widget - Hidden on mobile, visible on desktop sidebar */}
-            <div className="hidden md:block">
+            <div className="hidden lg:block">
               <TopSnowList 
                 data={topResorts} 
                 isLoading={isTopLoading} 
@@ -220,10 +337,10 @@ const App: React.FC = () => {
           </div>
 
           {/* Right Column: Main Content */}
-          <div className="md:col-span-2">
+          <div className="lg:col-span-2">
             
             {/* Mobile Top 5 (Visible only on mobile above card) */}
-            <div className="md:hidden">
+            <div className="lg:hidden">
                <TopSnowList 
                 data={topResorts} 
                 isLoading={isTopLoading} 
@@ -240,9 +357,9 @@ const App: React.FC = () => {
               {isLoading ? (
                 <div className="flex flex-col items-center justify-center h-64 space-y-4 animate-in fade-in duration-500 bg-white rounded-3xl border border-slate-100 shadow-sm">
                   <Loader2 className="w-10 h-10 text-blue-500 animate-spin" />
-                  <p className="text-slate-500 font-medium">正在分析 {selectedResort}...</p>
+                  <p className="text-slate-500 font-medium">Analyzing {selectedResort}...</p>
                   <div className="text-xs text-slate-400 max-w-xs text-center">
-                    获取10天降雪预测与实时雪况
+                    Fetching 10-day forecast & live conditions
                   </div>
                 </div>
               ) : resortData ? (
@@ -257,7 +374,7 @@ const App: React.FC = () => {
               ) : (
                 <div className="flex flex-col items-center justify-center h-64 text-center p-6 bg-white rounded-3xl border border-dashed border-slate-300">
                   <Mountain size={48} className="text-slate-200 mb-4" />
-                  <p className="text-slate-500">无法加载数据。请尝试搜索其他滑雪场。</p>
+                  <p className="text-slate-500">Unable to load data. Try searching for another resort.</p>
                 </div>
               )}
             </div>
@@ -265,21 +382,21 @@ const App: React.FC = () => {
 
         </div>
 
-        {/* AI Assistant Section (Replaces Feedback) */}
+        {/* AI Assistant Section */}
         <div className="mt-12 max-w-2xl mx-auto px-4">
-          <div className="bg-gradient-to-br from-indigo-50 to-blue-50 rounded-2xl p-6 border border-indigo-100 shadow-sm relative overflow-hidden">
+          <div className="bg-gradient-to-br from-indigo-50 via-blue-50 to-purple-50 rounded-2xl p-6 border border-indigo-100 shadow-sm relative overflow-hidden">
             <div className="absolute top-0 right-0 p-4 opacity-10 text-indigo-500">
               <Bot size={100} />
             </div>
             
             <div className="relative z-10">
               <div className="flex items-center gap-2 mb-3">
-                <div className="p-1.5 bg-indigo-500 text-white rounded-lg shadow-sm">
+                <div className="p-1.5 bg-gradient-to-br from-indigo-500 to-purple-500 text-white rounded-lg shadow-sm">
                   <Bot size={18} />
                 </div>
-                <h3 className="font-bold text-slate-800">AI 滑雪小助手</h3>
+                <h3 className="font-bold text-slate-800">AI Ski Assistant</h3>
                 <span className="text-xs font-medium text-indigo-600 bg-indigo-100 px-2 py-0.5 rounded-full">
-                  Flash Lite
+                  Powered by Gemini
                 </span>
               </div>
               
@@ -293,7 +410,7 @@ const App: React.FC = () => {
                   </div>
                 ) : (
                   <p className="text-slate-400 italic">
-                    "想知道哪个雪场适合新手？或者如何挑选滑雪镜？随时问我！"
+                    "Ask me anything about skiing - gear, technique, conditions, or resort tips!"
                   </p>
                 )}
               </div>
@@ -303,14 +420,14 @@ const App: React.FC = () => {
                   type="text"
                   value={chatQuery}
                   onChange={(e) => setChatQuery(e.target.value)}
-                  placeholder="问点什么..."
+                  placeholder="Ask something..."
                   className="flex-1 bg-white border-transparent focus:border-indigo-500 focus:ring-2 focus:ring-indigo-200 rounded-xl px-4 py-2.5 text-sm text-slate-800 placeholder:text-slate-400 transition-all shadow-sm"
                   disabled={isChatLoading}
                 />
                 <button
                   type="submit"
                   disabled={!chatQuery.trim() || isChatLoading}
-                  className="flex items-center gap-2 px-4 py-2.5 bg-indigo-600 text-white text-sm font-medium rounded-xl hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed transition-all shadow-sm active:scale-95"
+                  className="flex items-center gap-2 px-4 py-2.5 bg-gradient-to-r from-indigo-600 to-purple-600 text-white text-sm font-medium rounded-xl hover:from-indigo-700 hover:to-purple-700 disabled:opacity-50 disabled:cursor-not-allowed transition-all shadow-lg shadow-indigo-500/25 active:scale-95"
                 >
                   {isChatLoading ? (
                     <Loader2 size={18} className="animate-spin" />
@@ -323,13 +440,32 @@ const App: React.FC = () => {
           </div>
         </div>
 
+        {/* OpenSnow Comparison Banner */}
+        <div className="mt-8 max-w-2xl mx-auto px-4">
+          <div className="bg-gradient-to-r from-emerald-50 to-teal-50 rounded-xl p-4 border border-emerald-200">
+            <div className="flex items-center gap-3">
+              <div className="text-3xl">🏆</div>
+              <div>
+                <h4 className="font-semibold text-emerald-800">Why Choose SnowPeak?</h4>
+                <p className="text-sm text-emerald-700">
+                  <span className="font-medium">100% FREE</span> 10-day forecasts • No ads • AI-powered insights • 
+                  Real-time data from Google Search
+                </p>
+              </div>
+            </div>
+          </div>
+        </div>
+
         {/* Info Section */}
         <div className="mt-12 text-center border-t border-slate-200 pt-8">
-            <h4 className="text-sm font-semibold text-slate-900 mb-2">关于 SnowPeak Tracker</h4>
+            <h4 className="text-sm font-semibold text-slate-900 mb-2">About SnowPeak Tracker</h4>
             <p className="text-sm text-slate-500 max-w-lg mx-auto leading-relaxed">
-              本应用使用 Google Gemini AI 实时分析全美各大滑雪场的天气模型。
+              Free snow forecasting app powered by Google Gemini AI with real-time search.
               <br />
-              支持10天预测与智能缓存。数据仅供参考，滑雪前请务必查看官方安全警示。
+              10-day forecasts, live conditions, and intelligent caching. Data for reference only - always check official safety warnings.
+            </p>
+            <p className="text-xs text-slate-400 mt-4">
+              Built to beat OpenSnow 💪 • Made with ❄️ in 2026
             </p>
         </div>
       </main>
