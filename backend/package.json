@@ -6,7 +6,7 @@
     "dev": "node --env-file=.env --import tsx src/index.ts",
     "dev:watch": "tsx watch --env-file=.env src/index.ts",
     "build": "tsc",
-    "start": "node --env-file=.env dist/index.js",
+    "start": "node dist/index.js",
     "preload": "node --env-file=.env --import tsx src/services/preloader.ts",
     "seed": "node --env-file=.env --import tsx src/db/seed.ts"
   },
@@ -16,6 +16,7 @@
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
     "express": "^4.21.0",
+    "resend": "^4.1.1",
     "zod": "^3.23.8"
   },
   "devDependencies": {

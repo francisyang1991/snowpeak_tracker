@@ -1,7 +1,26 @@
 import { Router } from 'express';
 import { supabase, getToday, getDaysFromNow } from '../db/supabase.js';
+import { sendAlertEmail } from '../services/email.js';
 
 export const alertRoutes = Router();
+
+function isMissingTableError(error: any): boolean {
+  return (
+    error &&
+    typeof error === 'object' &&
+    // Supabase PostgREST uses PGRST205 when a table/view isn't present
+    (error.code === 'PGRST205' ||
+      (typeof error.message === 'string' && error.message.includes('Could not find the table')))
+  );
+}
+
+function missingTablesResponse() {
+  return {
+    error:
+      'Alerts database tables are not set up yet. Run the Supabase migration `backend/supabase/migrations/001_initial_schema.sql` in the Supabase SQL editor, then restart the backend.',
+    code: 'ALERT_TABLES_MISSING',
+  };
+}
 
 // Threshold definitions (in inches)
 const THRESHOLDS = {
@@ -53,7 +72,12 @@ alertRoutes.post('/subscribe', async (req, res) => {
       .select()
       .single();
 
-    if (error) throw error;
+    if (error) {
+      if (isMissingTableError(error)) {
+        return res.status(503).json(missingTablesResponse());
+      }
+      throw error;
+    }
 
     // Check if there's already snow predicted that meets the threshold
     const alertCheck = await checkForAlerts(subscription.id);
@@ -73,6 +97,9 @@ alertRoutes.post('/subscribe', async (req, res) => {
     });
   } catch (error) {
     console.error('Error creating subscription:', error);
+    if (isMissingTableError(error)) {
+      return res.status(503).json(missingTablesResponse());
+    }
     res.status(500).json({ error: 'Failed to create subscription' });
   }
 });
@@ -97,7 +124,12 @@ alertRoutes.get('/my', async (req, res) => {
       .eq('is_active', true)
       .order('created_at', { ascending: false });
 
-    if (error) throw error;
+    if (error) {
+      if (isMissingTableError(error)) {
+        return res.status(503).json(missingTablesResponse());
+      }
+      throw error;
+    }
 
     // Format response
     const formatted = (subscriptions || []).map((sub: any) => {
@@ -130,6 +162,9 @@ alertRoutes.get('/my', async (req, res) => {
     });
   } catch (error) {
     console.error('Error fetching subscriptions:', error);
+    if (isMissingTableError(error)) {
+      return res.status(503).json(missingTablesResponse());
+    }
     res.status(500).json({ error: 'Failed to fetch subscriptions' });
   }
 });
@@ -199,7 +234,18 @@ alertRoutes.get('/notifications', async (req, res) => {
 
     const { data: notifications, error } = await query;
 
-    if (error) throw error;
+    if (error) {
+      // Don't spam the UI with 500s if alerts tables aren't migrated yet.
+      if (isMissingTableError(error)) {
+        return res.json({
+          count: 0,
+          notifications: [],
+          unavailable: true,
+          reason: missingTablesResponse().error,
+        });
+      }
+      throw error;
+    }
 
     res.json({
       count: notifications?.length || 0,
@@ -217,6 +263,14 @@ alertRoutes.get('/notifications', async (req, res) => {
     });
   } catch (error) {
     console.error('Error fetching notifications:', error);
+    if (isMissingTableError(error)) {
+      return res.json({
+        count: 0,
+        notifications: [],
+        unavailable: true,
+        reason: missingTablesResponse().error,
+      });
+    }
     res.status(500).json({ error: 'Failed to fetch notifications' });
   }
 });
@@ -239,6 +293,9 @@ alertRoutes.post('/notifications/:id/read', async (req, res) => {
     res.json({ success: true });
   } catch (error) {
     console.error('Error marking notification as read:', error);
+    if (isMissingTableError(error)) {
+      return res.status(503).json(missingTablesResponse());
+    }
     res.status(500).json({ error: 'Failed to mark as read' });
   }
 });
@@ -274,6 +331,9 @@ alertRoutes.post('/notifications/read-all', async (req, res) => {
     res.json({ success: true });
   } catch (error) {
     console.error('Error marking all as read:', error);
+    if (isMissingTableError(error)) {
+      return res.status(503).json(missingTablesResponse());
+    }
     res.status(500).json({ error: 'Failed to mark all as read' });
   }
 });
@@ -384,6 +444,31 @@ async function checkForAlerts(subscriptionId: number): Promise<boolean> {
         last_checked: new Date().toISOString(),
       })
       .eq('id', subscriptionId);
+
+    // Email (optional): send if user provided an email and Resend is configured
+    if (subscription.email) {
+      const subject = `${snowLabel} Snow Alert: ${subscription.resort_name}`;
+      const html = `
+        <div style="font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial;">
+          <h2 style="margin:0 0 8px 0;">${subject}</h2>
+          <p style="margin:0 0 8px 0;">${forecast.predicted_snow}" of snow predicted for <b>${formatDate(
+            forecast.forecast_date,
+          )}</b>.</p>
+          <p style="margin:0;color:#64748b;">SnowPeak Tracker • You can manage alerts in the app.</p>
+        </div>
+      `;
+
+      try {
+        await sendAlertEmail({
+          to: subscription.email,
+          subject,
+          html,
+        });
+      } catch (e) {
+        console.error('Error sending alert email (Resend):', e);
+        // do not fail the alert creation if email delivery fails
+      }
+    }
 
     return true;
   } catch (error) {

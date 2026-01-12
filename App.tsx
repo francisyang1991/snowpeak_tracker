@@ -11,9 +11,14 @@ import NotificationBell from './components/NotificationBell';
 const DEFAULT_POPULAR = [
   "Crystal Mountain",
   "Big Sky",
-  "Whistler",
-  "Copper Mountain"
+  "Copper Mountain",
+  "Mt Bachelor"
 ];
+
+const FAVORITES_STORAGE_KEY = 'snowPeakFavorites';
+const FAVORITES_VERSION_KEY = 'snowPeakFavoritesVersion';
+const FAVORITES_VERSION = 3;
+const PREVIOUS_DEFAULTS_V2 = ["Crystal Mountain", "Big Sky", "Whistler", "Copper Mountain"];
 
 // Check if backend is available
 const USE_BACKEND = import.meta.env.VITE_API_URL || false;
@@ -28,8 +33,26 @@ const App: React.FC = () => {
   // Favorites State with LocalStorage
   const [favorites, setFavorites] = useState<string[]>(() => {
     try {
-      const saved = localStorage.getItem('snowPeakFavorites');
-      return saved ? JSON.parse(saved) : DEFAULT_POPULAR;
+      const saved = localStorage.getItem(FAVORITES_STORAGE_KEY);
+      const version = parseInt(localStorage.getItem(FAVORITES_VERSION_KEY) || '0', 10);
+      const parsed = saved ? JSON.parse(saved) : null;
+
+      if (Array.isArray(parsed)) {
+        // If user still has an old default set, migrate to the new defaults.
+        if (version < FAVORITES_VERSION) {
+          const sameAsPrevDefaults =
+            JSON.stringify(parsed) === JSON.stringify(PREVIOUS_DEFAULTS_V2);
+          const sameAsOriginalDefaults =
+            JSON.stringify(parsed) === JSON.stringify(["Vail","Aspen Snowmass","Jackson Hole","Park City","Mammoth Mountain"]);
+
+          if (sameAsPrevDefaults || sameAsOriginalDefaults) {
+            return DEFAULT_POPULAR;
+          }
+        }
+        return parsed;
+      }
+
+      return DEFAULT_POPULAR;
     } catch {
       return DEFAULT_POPULAR;
     }
@@ -54,13 +77,14 @@ const App: React.FC = () => {
 
   // Save favorites when changed
   useEffect(() => {
-    localStorage.setItem('snowPeakFavorites', JSON.stringify(favorites));
+    localStorage.setItem(FAVORITES_STORAGE_KEY, JSON.stringify(favorites));
+    localStorage.setItem(FAVORITES_VERSION_KEY, String(FAVORITES_VERSION));
   }, [favorites]);
 
   // Load Top 5 Lists
-  const loadTopList = useCallback(async (region: string) => {
+  const loadTopList = useCallback(async (region: string, forceRefresh = false) => {
     // Check frontend cache first
-    if (topListCache[region]) {
+    if (!forceRefresh && topListCache[region]) {
       setTopResorts(topListCache[region]);
       // Check for alerts
       const top = topListCache[region][0];
@@ -76,7 +100,7 @@ const App: React.FC = () => {
     try {
       // Call backend API - backend will check its own database cache first
       const data = USE_BACKEND 
-        ? await api.fetchTopResorts(region)
+        ? await api.fetchTopResortsWithRefresh(region, 5, forceRefresh)
         : await fetchTopSnowfallRegions(region);
       
       setTopResorts(data);
@@ -340,6 +364,7 @@ const App: React.FC = () => {
                 isLoading={isTopLoading} 
                 activeRegion={activeRegion}
                 onSelectRegion={handleRegionChange}
+                onRefresh={(region) => loadTopList(region, true)}
                 onSelectResort={(name) => {
                   setSelectedResort(name);
                   window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -358,6 +383,7 @@ const App: React.FC = () => {
                 isLoading={isTopLoading} 
                 activeRegion={activeRegion}
                 onSelectRegion={handleRegionChange}
+                onRefresh={(region) => loadTopList(region, true)}
                 onSelectResort={(name) => {
                   setSelectedResort(name);
                   window.scrollTo({ top: 0, behavior: 'smooth' });

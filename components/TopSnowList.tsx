@@ -1,5 +1,5 @@
 import React from 'react';
-import { CloudSnow, ChevronRight, TrendingUp, Snowflake } from 'lucide-react';
+import { CloudSnow, ChevronRight, TrendingUp, Snowflake, RefreshCw } from 'lucide-react';
 import { TopResort } from '../types';
 
 interface TopSnowListProps {
@@ -8,6 +8,7 @@ interface TopSnowListProps {
   activeRegion: string;
   onSelectRegion: (region: string) => void;
   onSelectResort: (name: string) => void;
+  onRefresh?: (region: string) => void;
 }
 
 const REGIONS = [
@@ -34,7 +35,8 @@ const TopSnowList: React.FC<TopSnowListProps> = ({
   isLoading, 
   activeRegion, 
   onSelectRegion, 
-  onSelectResort 
+  onSelectResort,
+  onRefresh,
 }) => {
   // Calculate total predicted snow
   const totalPredictedSnow = data.reduce((sum, r) => sum + r.predictedSnow, 0);
@@ -52,12 +54,25 @@ const TopSnowList: React.FC<TopSnowListProps> = ({
             <p className="text-[10px] text-slate-400">Top resorts by predicted snowfall</p>
           </div>
         </div>
-        {avgSnow > 0 && (
-          <div className="text-right">
-            <div className="text-xs text-slate-400">Avg</div>
-            <div className="text-lg font-bold text-blue-600">{avgSnow}"</div>
-          </div>
-        )}
+        <div className="flex items-center gap-2">
+          {onRefresh && (
+            <button
+              type="button"
+              onClick={() => onRefresh(activeRegion)}
+              disabled={isLoading}
+              className="p-2 rounded-xl border border-slate-200 bg-white text-slate-500 hover:text-blue-600 hover:border-blue-200 hover:bg-blue-50 transition-all disabled:opacity-50"
+              title="Refresh forecast"
+            >
+              <RefreshCw size={16} className={isLoading ? 'animate-spin' : ''} />
+            </button>
+          )}
+          {avgSnow > 0 && (
+            <div className="text-right">
+              <div className="text-xs text-slate-400">Avg</div>
+              <div className="text-lg font-bold text-blue-600">{avgSnow}"</div>
+            </div>
+          )}
+        </div>
       </div>
 
       {/* Region Selector */}

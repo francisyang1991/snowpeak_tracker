@@ -96,6 +96,31 @@ export async function fetchTopResorts(region = 'All', limit = 5): Promise<TopRes
 }
 
 /**
+ * Fetch top resorts by snowfall with optional force-refresh (bypass cache)
+ */
+export async function fetchTopResortsWithRefresh(
+  region = 'All',
+  limit = 5,
+  refresh = false,
+): Promise<TopResort[]> {
+  const params = new URLSearchParams({
+    region,
+    limit: String(limit),
+  });
+  if (refresh) params.set('refresh', 'true');
+
+  const url = `${API_BASE}/forecasts/top?${params.toString()}`;
+  const response = await fetch(url);
+
+  if (!response.ok) {
+    throw new Error(`Failed to fetch top resorts: ${response.statusText}`);
+  }
+
+  const data = await response.json();
+  return data.resorts || [];
+}
+
+/**
  * Fetch map data (all resorts with coordinates)
  */
 export async function fetchMapData(options?: {

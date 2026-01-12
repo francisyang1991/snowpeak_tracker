@@ -7,6 +7,60 @@ export const resortRoutes = Router();
 // Cache duration: 1 hour
 const CACHE_DURATION_HOURS = 1;
 
+type DbMode = 'snake' | 'prisma';
+let dbMode: DbMode | null = null;
+
+function isMissingTableError(error: any): boolean {
+  return (
+    error &&
+    typeof error === 'object' &&
+    (error.code === 'PGRST205' ||
+      (typeof error.message === 'string' && error.message.includes('Could not find the table')))
+  );
+}
+
+async function detectDbMode(): Promise<DbMode> {
+  if (dbMode) return dbMode;
+
+  // Prefer snake_case tables (what this backend was originally written for),
+  // but fall back to Prisma-style PascalCase tables if those are what exist.
+  const snakeProbe = await supabase.from('resorts').select('id').limit(1);
+  if (!snakeProbe.error) {
+    dbMode = 'snake';
+    return dbMode;
+  }
+  if (!isMissingTableError(snakeProbe.error)) {
+    // Unexpected error (permissions, etc.) — still treat as snake to keep behavior stable.
+    dbMode = 'snake';
+    return dbMode;
+  }
+
+  const prismaProbe = await supabase.from('Resort').select('id').limit(1);
+  if (!prismaProbe.error) {
+    dbMode = 'prisma';
+    return dbMode;
+  }
+
+  // Default to snake, but we'll likely fail with clearer errors later.
+  dbMode = 'snake';
+  return dbMode;
+}
+
+function parseDbTimestamp(value: unknown): number {
+  if (!value) return 0;
+  if (value instanceof Date) return value.getTime();
+  if (typeof value === 'number') return value;
+  if (typeof value !== 'string') return 0;
+
+  // Supabase/PostgREST can return `timestamp without time zone` values like
+  // `2026-01-12T03:19:40.195` (no timezone). JS interprets that as local time,
+  // which can make cache ages negative depending on machine TZ.
+  const hasTz = value.endsWith('Z') || value.includes('+') || /-\d\d:\d\d$/.test(value);
+  const iso = hasTz ? value : `${value}Z`;
+  const ms = Date.parse(iso);
+  return Number.isFinite(ms) ? ms : 0;
+}
+
 /**
  * GET /api/resorts
  * List all resorts with optional filtering
@@ -14,18 +68,19 @@ const CACHE_DURATION_HOURS = 1;
 resortRoutes.get('/', async (req, res) => {
   try {
     const { region, state, limit = '50' } = req.query;
-    
-    let query = supabase
-      .from('resorts')
-      .select('*')
-      .order('name', { ascending: true })
-      .limit(parseInt(limit as string));
+
+    const mode = await detectDbMode();
+    const resortsTable = mode === 'prisma' ? 'Resort' : 'resorts';
+    const stateCol = mode === 'prisma' ? 'state' : 'state';
+    const regionCol = mode === 'prisma' ? 'region' : 'region';
+
+    let query = supabase.from(resortsTable).select('*').order('name', { ascending: true }).limit(parseInt(limit as string));
     
     if (region) {
-      query = query.eq('region', region);
+      query = query.eq(regionCol, region);
     }
     if (state) {
-      query = query.eq('state', state);
+      query = query.eq(stateCol, state);
     }
     
     const { data: resorts, error } = await query;
@@ -53,135 +108,217 @@ resortRoutes.get('/:id', async (req, res) => {
     const { refresh } = req.query;
     const now = Date.now();
     const oneHourAgo = getHoursAgo(CACHE_DURATION_HOURS);
+    const mode = await detectDbMode();
+
+    const resortsTable = mode === 'prisma' ? 'Resort' : 'resorts';
+    const reportsTable = mode === 'prisma' ? 'SnowReport' : 'snow_reports';
+    const forecastsTable = mode === 'prisma' ? 'Forecast' : 'forecasts';
+
+    const reportResortIdCol = mode === 'prisma' ? 'resortId' : 'resort_id';
+    const reportCreatedAtCol = mode === 'prisma' ? 'createdAt' : 'created_at';
+
+    const forecastResortIdCol = mode === 'prisma' ? 'resortId' : 'resort_id';
+    const forecastDateCol = mode === 'prisma' ? 'forecastDate' : 'forecast_date';
+    const forecastFetchedAtCol = mode === 'prisma' ? 'fetchedAt' : 'fetched_at';
 
     // 1. Try to get resort from database
-    const { data: resort, error: resortError } = await supabase
-      .from('resorts')
-      .select('*')
-      .eq('id', id)
-      .maybeSingle();
+    const { data: resort, error: resortError } = await supabase.from(resortsTable).select('*').eq('id', id).maybeSingle();
+    if (resortError && !isMissingTableError(resortError)) throw resortError;
 
-    // Get latest snow report (within last hour)
-    const { data: latestReport } = await supabase
-      .from('snow_reports')
+    // Get latest snow report (we compute freshness in code; avoids fragile server-side timestamp filtering)
+    const { data: latestReport, error: reportError } = await supabase
+      .from(reportsTable)
       .select('*')
-      .eq('resort_id', id)
-      .gte('created_at', oneHourAgo)
-      .order('created_at', { ascending: false })
+      .eq(reportResortIdCol, id)
+      .order(reportCreatedAtCol, { ascending: false })
       .limit(1)
       .maybeSingle();
+    if (reportError && !isMissingTableError(reportError)) throw reportError;
 
     // Get forecasts
-    const { data: forecasts } = await supabase
-      .from('forecasts')
+    const { data: forecasts, error: forecastError } = await supabase
+      .from(forecastsTable)
       .select('*')
-      .eq('resort_id', id)
-      .gte('forecast_date', getToday())
-      .order('forecast_date', { ascending: true })
+      .eq(forecastResortIdCol, id)
+      .gte(forecastDateCol, getToday())
+      .order(forecastDateCol, { ascending: true })
       .limit(10);
+    if (forecastError && !isMissingTableError(forecastError)) throw forecastError;
 
     // Check if we have fresh cached data
-    const hasFreshCache = !!latestReport;
+    const cacheAgeSeconds = latestReport
+      ? Math.floor((now - parseDbTimestamp((latestReport as any)[reportCreatedAtCol])) / 1000)
+      : null;
+    const hasFreshCache = cacheAgeSeconds !== null && cacheAgeSeconds < CACHE_DURATION_HOURS * 3600;
+
     const hasForecastData = forecasts && forecasts.length > 0;
+    const newestForecastFetchedAt = hasForecastData
+      ? Math.max(...(forecasts as any[]).map((f) => parseDbTimestamp((f as any)[forecastFetchedAtCol])))
+      : 0;
+    const forecastCacheAgeSeconds = newestForecastFetchedAt ? Math.floor((now - newestForecastFetchedAt) / 1000) : null;
+    const hasFreshForecastCache =
+      forecastCacheAgeSeconds !== null && forecastCacheAgeSeconds < CACHE_DURATION_HOURS * 3600;
 
     // If we have fresh cached data and user didn't request refresh, return cached data
-    if (refresh !== 'true' && resort && hasFreshCache && hasForecastData) {
-      const cacheAge = Math.floor((now - new Date(latestReport.created_at).getTime()) / 1000);
-      console.log(`[Cache HIT] Resort: ${id}, Cache age: ${cacheAge}s`);
+    if (refresh !== 'true' && resort && hasFreshCache && hasForecastData && hasFreshForecastCache) {
+      console.log(`[Cache HIT] Resort: ${id}, Cache age: ${cacheAgeSeconds}s`);
       
       return res.json({
-        id: resort.id,
-        name: resort.name,
-        location: resort.location,
-        state: resort.state,
-        region: resort.region,
-        websiteUrl: resort.website_url,
-        totalLifts: resort.total_lifts,
-        totalTrails: resort.total_trails,
-        baseDepth: latestReport.base_depth || 0,
-        last24Hours: latestReport.last_24_hours || 0,
-        last48Hours: latestReport.last_48_hours || 0,
-        liftsOpen: latestReport.lifts_open || 0,
-        trailsOpen: latestReport.trails_open || 0,
-        conditions: latestReport.conditions,
-        forecast: forecasts.map((f: any) => ({
-          date: formatDateShort(f.forecast_date),
-          dayName: getDayName(f.forecast_date),
-          snowInches: f.predicted_snow,
-          tempHigh: f.temp_high,
-          tempLow: f.temp_low,
+        id: (resort as any).id,
+        name: (resort as any).name,
+        location: (resort as any).location,
+        state: (resort as any).state,
+        region: (resort as any).region,
+        websiteUrl: mode === 'prisma' ? (resort as any).websiteUrl : (resort as any).website_url,
+        totalLifts: mode === 'prisma' ? (resort as any).totalLifts : (resort as any).total_lifts,
+        totalTrails: mode === 'prisma' ? (resort as any).totalTrails : (resort as any).total_trails,
+        baseDepth: mode === 'prisma' ? (latestReport as any)?.baseDepth || 0 : (latestReport as any)?.base_depth || 0,
+        last24Hours: mode === 'prisma' ? (latestReport as any)?.last24Hours || 0 : (latestReport as any)?.last_24_hours || 0,
+        last48Hours: mode === 'prisma' ? (latestReport as any)?.last48Hours || 0 : (latestReport as any)?.last_48_hours || 0,
+        liftsOpen: mode === 'prisma' ? (latestReport as any)?.liftsOpen || 0 : (latestReport as any)?.lifts_open || 0,
+        trailsOpen: mode === 'prisma' ? (latestReport as any)?.trailsOpen || 0 : (latestReport as any)?.trails_open || 0,
+        conditions: (latestReport as any)?.conditions,
+        forecast: (forecasts || []).map((f: any) => ({
+          date: formatDateShort(mode === 'prisma' ? f.forecastDate : f.forecast_date),
+          dayName: getDayName(mode === 'prisma' ? f.forecastDate : f.forecast_date),
+          snowInches: mode === 'prisma' ? f.predictedSnow : f.predicted_snow,
+          tempHigh: mode === 'prisma' ? f.tempHigh : f.temp_high,
+          tempLow: mode === 'prisma' ? f.tempLow : f.temp_low,
           condition: f.condition,
         })),
-        lastUpdated: latestReport.created_at,
+        lastUpdated: (latestReport as any)?.[reportCreatedAtCol],
         cached: true,
-        cacheAge,
+        cacheAge: cacheAgeSeconds,
       });
     }
 
     // 2. Cache miss - fetch from Gemini
-    console.log(`[Cache MISS] Resort: ${id}, Reason: ${refresh === 'true' ? 'refresh requested' : !hasFreshCache ? 'cache stale' : 'no forecast data'}`);
+    console.log(
+      `[Cache MISS] Resort: ${id}, Reason: ${
+        refresh === 'true'
+          ? 'refresh requested'
+          : !hasFreshCache
+            ? 'cache stale'
+            : !hasForecastData
+              ? 'no forecast data'
+              : 'forecast cache stale'
+      }`,
+    );
     
     const resortName = id.replace(/-/g, ' ');
     const freshData = await geminiService.fetchResortSnowData(resortName);
 
     // Upsert resort
-    await supabase
-      .from('resorts')
-      .upsert({
-        id,
-        name: freshData.name || resortName,
-        location: freshData.location || 'USA',
-        state: extractState(freshData.location),
-        region: determineRegion(freshData.location),
-        website_url: freshData.websiteUrl,
-        total_lifts: freshData.totalLifts || 0,
-        total_trails: freshData.totalTrails || 0,
-        updated_at: new Date().toISOString(),
-      }, {
-        onConflict: 'id',
-      });
+    const nowTimestamp = new Date().toISOString();
+    const resortUpsert = await supabase
+      .from(resortsTable)
+      .upsert(
+        mode === 'prisma'
+          ? {
+              id,
+              name: freshData.name || resortName,
+              location: freshData.location || 'USA',
+              state: extractState(freshData.location),
+              region: determineRegion(freshData.location),
+              // Prisma schema requires lat/lng (non-null). Gemini resort fetch doesn't always provide them,
+              // so default to 0 and allow later enrichment via seeding/map pipeline.
+              latitude: (freshData as any).latitude ?? 0,
+              longitude: (freshData as any).longitude ?? 0,
+              websiteUrl: freshData.websiteUrl,
+              totalLifts: freshData.totalLifts || 0,
+              totalTrails: freshData.totalTrails || 0,
+              updatedAt: nowTimestamp,
+            }
+          : {
+              id,
+              name: freshData.name || resortName,
+              location: freshData.location || 'USA',
+              state: extractState(freshData.location),
+              region: determineRegion(freshData.location),
+              website_url: freshData.websiteUrl,
+              total_lifts: freshData.totalLifts || 0,
+              total_trails: freshData.totalTrails || 0,
+              updated_at: nowTimestamp,
+            },
+        { onConflict: 'id' },
+      );
+    if (resortUpsert.error) throw resortUpsert.error;
 
     // Insert snow report with explicit created_at to ensure cache works properly
     const today = getToday();
-    const nowTimestamp = new Date().toISOString();
-    await supabase
-      .from('snow_reports')
-      .upsert({
-        resort_id: id,
-        report_date: today,
-        base_depth: freshData.baseDepth || 0,
-        last_24_hours: freshData.last24Hours || 0,
-        last_48_hours: freshData.last48Hours || 0,
-        lifts_open: freshData.liftsOpen || 0,
-        trails_open: freshData.trailsOpen || 0,
-        conditions: freshData.conditions,
-        data_source: 'gemini',
-        raw_response: freshData,
-        created_at: nowTimestamp,  // Explicitly set to ensure cache timestamp is updated
-      }, {
-        onConflict: 'resort_id,report_date',
-      });
+    const reportUpsert = await supabase
+      .from(reportsTable)
+      .upsert(
+        mode === 'prisma'
+          ? {
+              resortId: id,
+              reportDate: today,
+              baseDepth: freshData.baseDepth || 0,
+              last24Hours: freshData.last24Hours || 0,
+              last48Hours: freshData.last48Hours || 0,
+              last7Days: (freshData as any).last7Days || 0,
+              liftsOpen: freshData.liftsOpen || 0,
+              trailsOpen: freshData.trailsOpen || 0,
+              conditions: freshData.conditions,
+              dataSource: 'gemini',
+              rawResponse: freshData,
+              createdAt: nowTimestamp,
+            }
+          : {
+              resort_id: id,
+              report_date: today,
+              base_depth: freshData.baseDepth || 0,
+              last_24_hours: freshData.last24Hours || 0,
+              last_48_hours: freshData.last48Hours || 0,
+              lifts_open: freshData.liftsOpen || 0,
+              trails_open: freshData.trailsOpen || 0,
+              conditions: freshData.conditions,
+              data_source: 'gemini',
+              raw_response: freshData,
+              created_at: nowTimestamp,
+            },
+        {
+          onConflict: mode === 'prisma' ? 'resortId,reportDate' : 'resort_id,report_date',
+        },
+      );
+    if (reportUpsert.error) throw reportUpsert.error;
 
     // Insert forecasts with explicit fetched_at
     if (freshData.forecast && Array.isArray(freshData.forecast)) {
       for (const day of freshData.forecast) {
         const forecastDate = parseDate(day.date);
         if (forecastDate) {
-          await supabase
-            .from('forecasts')
-            .upsert({
-              resort_id: id,
-              forecast_date: forecastDate,
-              predicted_snow: day.snowInches || 0,
-              temp_high: day.tempHigh,
-              temp_low: day.tempLow,
-              condition: day.condition,
-              snow_probability: day.snowProbability,
-              wind_speed: day.windSpeed,
-              fetched_at: nowTimestamp,  // Use same timestamp for consistency
-            }, {
-              onConflict: 'resort_id,forecast_date',
-            });
+          const forecastUpsert = await supabase
+            .from(forecastsTable)
+            .upsert(
+              mode === 'prisma'
+                ? {
+                    resortId: id,
+                    forecastDate,
+                    predictedSnow: day.snowInches || 0,
+                    tempHigh: day.tempHigh,
+                    tempLow: day.tempLow,
+                    condition: day.condition,
+                    snowProbability: day.snowProbability,
+                    windSpeed: day.windSpeed,
+                    fetchedAt: nowTimestamp,
+                  }
+                : {
+                    resort_id: id,
+                    forecast_date: forecastDate,
+                    predicted_snow: day.snowInches || 0,
+                    temp_high: day.tempHigh,
+                    temp_low: day.tempLow,
+                    condition: day.condition,
+                    snow_probability: day.snowProbability,
+                    wind_speed: day.windSpeed,
+                    fetched_at: nowTimestamp,
+                  },
+              {
+                onConflict: mode === 'prisma' ? 'resortId,forecastDate' : 'resort_id,forecast_date',
+              },
+            );
+          if (forecastUpsert.error) throw forecastUpsert.error;
         }
       }
       console.log(`[Cache STORED] Saved resort ${id} with ${freshData.forecast.length} forecast days`);
@@ -209,12 +346,17 @@ resortRoutes.get('/:id/forecast', async (req, res) => {
     const { id } = req.params;
     const { days = '10' } = req.query;
 
+    const mode = await detectDbMode();
+    const forecastsTable = mode === 'prisma' ? 'Forecast' : 'forecasts';
+    const forecastResortIdCol = mode === 'prisma' ? 'resortId' : 'resort_id';
+    const forecastDateCol = mode === 'prisma' ? 'forecastDate' : 'forecast_date';
+
     const { data: forecasts, error } = await supabase
-      .from('forecasts')
+      .from(forecastsTable)
       .select('*')
-      .eq('resort_id', id)
-      .gte('forecast_date', getToday())
-      .order('forecast_date', { ascending: true })
+      .eq(forecastResortIdCol, id)
+      .gte(forecastDateCol, getToday())
+      .order(forecastDateCol, { ascending: true })
       .limit(parseInt(days as string));
 
     if (error) throw error;
@@ -223,15 +365,15 @@ resortRoutes.get('/:id/forecast', async (req, res) => {
       resortId: id,
       count: forecasts?.length || 0,
       forecasts: forecasts?.map((f: any) => ({
-        date: formatDateShort(f.forecast_date),
-        dayName: getDayName(f.forecast_date),
-        snowInches: f.predicted_snow,
-        tempHigh: f.temp_high,
-        tempLow: f.temp_low,
+        date: formatDateShort(mode === 'prisma' ? f.forecastDate : f.forecast_date),
+        dayName: getDayName(mode === 'prisma' ? f.forecastDate : f.forecast_date),
+        snowInches: mode === 'prisma' ? f.predictedSnow : f.predicted_snow,
+        tempHigh: mode === 'prisma' ? f.tempHigh : f.temp_high,
+        tempLow: mode === 'prisma' ? f.tempLow : f.temp_low,
         condition: f.condition,
-        snowProbability: f.snow_probability,
-        windSpeed: f.wind_speed,
-        powderScore: f.powder_score,
+        snowProbability: mode === 'prisma' ? f.snowProbability : f.snow_probability,
+        windSpeed: mode === 'prisma' ? f.windSpeed : f.wind_speed,
+        powderScore: mode === 'prisma' ? f.powderScore : f.powder_score,
       })) || [],
     });
   } catch (error) {

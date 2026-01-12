@@ -4,6 +4,36 @@ import { geminiService } from '../services/gemini.js';
 
 export const forecastRoutes = Router();
 
+type DbMode = 'snake' | 'prisma';
+let dbMode: DbMode | null = null;
+
+function isMissingTableError(error: any): boolean {
+  return (
+    error &&
+    typeof error === 'object' &&
+    (error.code === 'PGRST205' ||
+      (typeof error.message === 'string' && error.message.includes('Could not find the table')))
+  );
+}
+
+async function detectDbMode(): Promise<DbMode> {
+  if (dbMode) return dbMode;
+  const snakeProbe = await supabase.from('resorts').select('id').limit(1);
+  if (!snakeProbe.error) {
+    dbMode = 'snake';
+    return dbMode;
+  }
+  if (isMissingTableError(snakeProbe.error)) {
+    const prismaProbe = await supabase.from('Resort').select('id').limit(1);
+    if (!prismaProbe.error) {
+      dbMode = 'prisma';
+      return dbMode;
+    }
+  }
+  dbMode = 'snake';
+  return dbMode;
+}
+
 // In-memory cache for top resorts by region (refresh every 1 hour)
 const topResortsCache: Record<string, {
   data: any[];
@@ -23,6 +53,7 @@ forecastRoutes.get('/top', async (req, res) => {
     const regionStr = region as string;
     const limitNum = parseInt(limit as string);
     const now = Date.now();
+    const mode = await detectDbMode();
 
     // 1. Check in-memory cache first (fastest)
     const memoryCache = topResortsCache[regionStr];
@@ -45,36 +76,71 @@ forecastRoutes.get('/top', async (req, res) => {
 
     // 2. Check database cache (within last hour)
     const oneHourAgo = getHoursAgo(1);
-    
+
+    const resortsTable = mode === 'prisma' ? 'Resort' : 'resorts';
+    const forecastsTable = mode === 'prisma' ? 'Forecast' : 'forecasts';
+    const forecastDateCol = mode === 'prisma' ? 'forecastDate' : 'forecast_date';
+    const fetchedAtCol = mode === 'prisma' ? 'fetchedAt' : 'fetched_at';
+    const predictedSnowCol = mode === 'prisma' ? 'predictedSnow' : 'predicted_snow';
+    const resortIdCol = mode === 'prisma' ? 'resortId' : 'resort_id';
+
+    // Use a 5-day window to compute the "top 5-day total" ranking.
+    const today = getToday();
+    const fiveDaysOut = getDaysFromNow(5);
+
     // Build query for forecasts with resort data
-    let query = supabase
-      .from('forecasts')
-      .select('*, resorts!inner(*)')
-      .gte('fetched_at', oneHourAgo)
-      .order('predicted_snow', { ascending: false })
-      .limit(limitNum * 3);
+    // Prisma mode: join via Resort relationship
+    // Snake mode: join via resorts relationship
+    let query =
+      mode === 'prisma'
+        ? supabase
+            .from(forecastsTable)
+            .select(`*, ${resortsTable}!inner(*)`)
+            .gte(fetchedAtCol, oneHourAgo)
+            .gte(forecastDateCol, today)
+            .lte(forecastDateCol, fiveDaysOut)
+            .order(predictedSnowCol, { ascending: false })
+            .limit(limitNum * 40)
+        : supabase
+            .from(forecastsTable)
+            .select('*, resorts!inner(*)')
+            .gte(fetchedAtCol, oneHourAgo)
+            .gte(forecastDateCol, today)
+            .lte(forecastDateCol, fiveDaysOut)
+            .order(predictedSnowCol, { ascending: false })
+            .limit(limitNum * 40);
 
     // Filter by region/state if specified
     if (regionStr !== 'All') {
-      query = query.or(`resorts.state.eq.${regionStr},resorts.region.eq.${regionStr}`);
+      // IMPORTANT: When filtering on a joined (foreign) table in PostgREST, you must use `foreignTable`
+      // and refer to columns without the table prefix.
+      const safe = regionStr.replace(/[^A-Za-z]/g, ''); // basic hardening for PostgREST filter syntax
+      query =
+        mode === 'prisma'
+          ? (query as any).or(`state.eq.${safe},region.eq.${safe}`, { foreignTable: 'Resort' })
+          : (query as any).or(`state.eq.${safe},region.eq.${safe}`, { foreignTable: 'resorts' });
     }
 
     const { data: dbForecasts, error } = await query;
+
+    if (error && !isMissingTableError(error)) {
+      throw error;
+    }
 
     if (!error && dbForecasts && dbForecasts.length > 0) {
       // Group forecasts by resort and sum predicted snow
       const resortSnowMap = new Map<string, { resort: any; totalSnow: number; fetchedAt: string }>();
       
       for (const forecast of dbForecasts) {
-        const resortId = forecast.resort_id;
+        const resortId = (forecast as any)[resortIdCol];
         const existing = resortSnowMap.get(resortId);
         if (existing) {
-          existing.totalSnow += forecast.predicted_snow;
+          existing.totalSnow += (forecast as any)[predictedSnowCol] || 0;
         } else {
           resortSnowMap.set(resortId, {
-            resort: forecast.resorts,
-            totalSnow: forecast.predicted_snow,
-            fetchedAt: forecast.fetched_at,
+            resort: mode === 'prisma' ? (forecast as any).Resort : (forecast as any).resorts,
+            totalSnow: (forecast as any)[predictedSnowCol] || 0,
+            fetchedAt: (forecast as any)[fetchedAtCol],
           });
         }
       }
@@ -123,40 +189,62 @@ forecastRoutes.get('/top', async (req, res) => {
     };
 
     // Store in database for persistence
-    const today = getToday();
     const nowTimestamp = new Date().toISOString();
     
     for (const resort of topResorts) {
       const id = resort.name.toLowerCase().replace(/\s+/g, '-');
       
       // Upsert resort
-      await supabase
-        .from('resorts')
-        .upsert({
-          id,
-          name: resort.name,
-          location: resort.location,
-          state: resort.state || 'US',
-          region: determineRegionFromState(resort.state),
-          latitude: resort.latitude || 0,
-          longitude: resort.longitude || 0,
-          updated_at: nowTimestamp,
-        }, {
-          onConflict: 'id',
-        });
+      const resortUpsert = await supabase
+        .from(mode === 'prisma' ? 'Resort' : 'resorts')
+        .upsert(
+          mode === 'prisma'
+            ? {
+                id,
+                name: resort.name,
+                location: resort.location,
+                state: resort.state || 'US',
+                region: determineRegionFromState(resort.state),
+                latitude: resort.latitude || 0,
+                longitude: resort.longitude || 0,
+                updatedAt: nowTimestamp,
+              }
+            : {
+                id,
+                name: resort.name,
+                location: resort.location,
+                state: resort.state || 'US',
+                region: determineRegionFromState(resort.state),
+                latitude: resort.latitude || 0,
+                longitude: resort.longitude || 0,
+                updated_at: nowTimestamp,
+              },
+          { onConflict: 'id' },
+        );
+      if (resortUpsert.error && !isMissingTableError(resortUpsert.error)) throw resortUpsert.error;
 
       // Store forecast with explicit fetched_at
-      await supabase
-        .from('forecasts')
-        .upsert({
-          resort_id: id,
-          forecast_date: today,
-          predicted_snow: resort.predictedSnow,
-          condition: resort.summary,
-          fetched_at: nowTimestamp,  // Explicitly set to ensure cache timestamp is updated
-        }, {
-          onConflict: 'resort_id,forecast_date',
-        });
+      const forecastUpsert = await supabase
+        .from(mode === 'prisma' ? 'Forecast' : 'forecasts')
+        .upsert(
+          mode === 'prisma'
+            ? {
+                resortId: id,
+                forecastDate: today,
+                predictedSnow: resort.predictedSnow,
+                condition: resort.summary,
+                fetchedAt: nowTimestamp,
+              }
+            : {
+                resort_id: id,
+                forecast_date: today,
+                predicted_snow: resort.predictedSnow,
+                condition: resort.summary,
+                fetched_at: nowTimestamp,
+              },
+          { onConflict: mode === 'prisma' ? 'resortId,forecastDate' : 'resort_id,forecast_date' },
+        );
+      if (forecastUpsert.error && !isMissingTableError(forecastUpsert.error)) throw forecastUpsert.error;
     }
     
     console.log(`[Cache STORED] Saved ${topResorts.length} resorts to database for region: ${regionStr}`);
@@ -181,14 +269,23 @@ forecastRoutes.get('/summary', async (req, res) => {
   try {
     const today = getToday();
     const fiveDaysOut = getDaysFromNow(5);
+    const mode = await detectDbMode();
 
     // Get forecasts with resort data
-    const { data: forecasts, error } = await supabase
-      .from('forecasts')
-      .select('*, resorts!inner(*)')
-      .gte('forecast_date', today)
-      .lte('forecast_date', fiveDaysOut)
-      .order('predicted_snow', { ascending: false });
+    const { data: forecasts, error } =
+      mode === 'prisma'
+        ? await supabase
+            .from('Forecast')
+            .select('*, Resort!inner(*)')
+            .gte('forecastDate', today)
+            .lte('forecastDate', fiveDaysOut)
+            .order('predictedSnow', { ascending: false })
+        : await supabase
+            .from('forecasts')
+            .select('*, resorts!inner(*)')
+            .gte('forecast_date', today)
+            .lte('forecast_date', fiveDaysOut)
+            .order('predicted_snow', { ascending: false });
 
     if (error) throw error;
 
@@ -196,14 +293,15 @@ forecastRoutes.get('/summary', async (req, res) => {
     const regionStats: Record<string, { totalSnow: number; resortCount: number; topResort: string }> = {};
     
     for (const forecast of forecasts || []) {
-      const region = forecast.resorts.region;
+      const region = mode === 'prisma' ? (forecast as any).Resort.region : (forecast as any).resorts.region;
       if (!regionStats[region]) {
         regionStats[region] = { totalSnow: 0, resortCount: 0, topResort: '' };
       }
-      regionStats[region].totalSnow += forecast.predicted_snow;
+      regionStats[region].totalSnow += mode === 'prisma' ? (forecast as any).predictedSnow : (forecast as any).predicted_snow;
       regionStats[region].resortCount++;
-      if (!regionStats[region].topResort && forecast.predicted_snow > 0) {
-        regionStats[region].topResort = forecast.resorts.name;
+      const predicted = mode === 'prisma' ? (forecast as any).predictedSnow : (forecast as any).predicted_snow;
+      if (!regionStats[region].topResort && predicted > 0) {
+        regionStats[region].topResort = mode === 'prisma' ? (forecast as any).Resort.name : (forecast as any).resorts.name;
       }
     }
 
