@@ -6,7 +6,7 @@ import { mapRoutes } from './routes/map.js';
 import { chatRoutes } from './routes/chat.js';
 import { alertRoutes } from './routes/alerts.js';
 import { quickPreload, preloadAllData } from './services/preloader.js';
-import { refreshAllCachedResorts, startBackgroundRefreshScheduler } from './services/backgroundRefresh.js';
+import { refreshAllCachedResorts, startBackgroundRefreshScheduler, populateKnownResorts } from './services/backgroundRefresh.js';
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -74,6 +74,35 @@ app.post('/api/preload', async (req, res) => {
   }
 });
 
+// Crawl endpoint - Discovery + Refresh
+app.post('/api/crawl', async (req, res) => {
+  try {
+    const secret = process.env.CRON_SECRET;
+    if (secret) {
+      const auth = req.header('authorization') || '';
+      if (auth !== `Bearer ${secret}`) {
+        return res.status(401).json({ error: 'Unauthorized' });
+      }
+    }
+
+    console.log('[Crawl] Manual crawl requested');
+    // Run in background so we don't timeout the request
+    (async () => {
+      try {
+        await populateKnownResorts();
+        await refreshAllCachedResorts({ maxResorts: 1000 });
+      } catch (e) {
+        console.error('[Crawl] Background job failed:', e);
+      }
+    })();
+
+    res.json({ ok: true, message: 'Crawl started in background' });
+  } catch (error) {
+    console.error('Crawl trigger failed:', error);
+    res.status(500).json({ error: 'Crawl trigger failed' });
+  }
+});
+
 // Refresh endpoint (safe to call from cron). Protect with CRON_SECRET if set.
 app.post('/api/refresh', async (req, res) => {
   try {
@@ -125,15 +154,23 @@ app.listen(PORT, () => {
   
   // Auto-preload on startup (runs in background, doesn't block server)
   const AUTO_PRELOAD = process.env.AUTO_PRELOAD !== 'false';
+  const FULL_STARTUP_REFRESH = process.env.FULL_STARTUP_REFRESH === 'true';
   
   if (AUTO_PRELOAD) {
     console.log('  🔄 Starting background preload...\n');
     
     // Run preload in background after 2 seconds
     setTimeout(() => {
-      quickPreload().catch(err => {
-        console.error('Background preload failed:', err);
-      });
+      if (FULL_STARTUP_REFRESH) {
+        console.log('  🔄 Full resort refresh on startup enabled');
+        refreshAllCachedResorts({ maxResorts: 100 }).catch(err => {
+          console.error('Startup refresh failed:', err);
+        });
+      } else {
+        quickPreload().catch(err => {
+          console.error('Background preload failed:', err);
+        });
+      }
     }, 2000);
   }
 
