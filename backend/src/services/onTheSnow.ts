@@ -245,6 +245,178 @@ export class OnTheSnowScraper {
   }
 
   /**
+   * Fetch top resorts by recent snowfall from OnTheSnow
+   * This scrapes the snow report table which shows 72-hour snowfall and 3-day forecast
+   */
+  async fetchTopSnowfallResorts(region: string = 'All', limit: number = 10): Promise<Array<{
+    name: string;
+    location: string;
+    state: string;
+    predictedSnow: number;
+    snow72h: number;
+    baseDepth: number;
+    conditions: string;
+    summary: string;
+    latitude?: number;
+    longitude?: number;
+  }>> {
+    // Map region filter to OnTheSnow URL
+    const regionUrls: Record<string, string> = {
+      'All': '/united-states/skireport',
+      'CO': '/colorado/skireport',
+      'UT': '/utah/skireport',
+      'CA': '/california/skireport',
+      'WA': '/washington/skireport',
+      'VT': '/vermont/skireport',
+      'WY': '/wyoming/skireport',
+      'MT': '/montana/skireport',
+      'ID': '/idaho/skireport',
+      'OR': '/oregon/skireport',
+      'NH': '/new-hampshire/skireport',
+      'ME': '/maine/skireport',
+      'NY': '/new-york/skireport',
+      'MI': '/michigan/skireport',
+      'NM': '/new-mexico/skireport',
+    };
+
+    const urlPath = regionUrls[region] || regionUrls['All'];
+    const url = `${this.baseUrl}${urlPath}`;
+
+    try {
+      console.log(`[Scraper] Fetching top snowfall from ${url}`);
+      const response = await axios.get(url, {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        }
+      });
+
+      const $ = cheerio.load(response.data);
+      const resorts: Array<{
+        name: string;
+        location: string;
+        state: string;
+        predictedSnow: number;
+        snow72h: number;
+        baseDepth: number;
+        conditions: string;
+        summary: string;
+      }> = [];
+
+      // The table has columns: Resort Name, 72 Hour Snowfall, 3 Day Snow Forecast, Base Depth, Open Trails, Open Lifts
+      const table = $('table').first();
+      const rows = table.find('tbody tr');
+
+      rows.each((i, row) => {
+        if (resorts.length >= limit) return false; // Stop after limit
+
+        const cells = $(row).find('td');
+        if (cells.length < 4) return; // Skip malformed rows
+
+        // Resort Name (first cell, contains link)
+        const nameCell = cells.eq(0);
+        const nameLink = nameCell.find('a');
+        const name = nameLink.find('div, span').first().text().trim() || nameLink.text().trim().split('\n')[0].trim();
+        const href = nameLink.attr('href') || '';
+
+        // Extract state from URL (e.g., /colorado/vail/skireport -> colorado)
+        const urlMatch = href.match(/^\/([^\/]+)\//);
+        const stateFromUrl = urlMatch ? this.regionToState(urlMatch[1]) : 'US';
+
+        // 72 Hour Snowfall (second cell)
+        const snow72hText = cells.eq(1).text().trim();
+        const snow72h = parseInt(snow72hText.replace(/\D/g, ''), 10) || 0;
+
+        // 3 Day Snow Forecast (third cell)
+        const forecast3dText = cells.eq(2).text().trim();
+        const forecast3d = parseInt(forecast3dText.replace(/\D/g, ''), 10) || 0;
+
+        // Base Depth (fourth cell) - can be range like "51-75""
+        const baseDepthText = cells.eq(3).text().trim();
+        const baseMatch = baseDepthText.match(/(\d+)/);
+        const baseDepth = baseMatch ? parseInt(baseMatch[1], 10) : 0;
+
+        // Conditions from base depth cell (e.g., "Powder", "Variable Conditions")
+        const conditions = baseDepthText.replace(/[\d\-"]+/g, '').trim() || 'Variable';
+
+        if (name && (snow72h > 0 || forecast3d > 0)) {
+          resorts.push({
+            name,
+            location: this.stateToFullName(stateFromUrl),
+            state: stateFromUrl,
+            predictedSnow: forecast3d > 0 ? forecast3d : snow72h, // Use forecast if available, else 72h
+            snow72h,
+            baseDepth,
+            conditions,
+            summary: `${snow72h}" in last 72h, ${forecast3d}" forecast. Base: ${baseDepth}". ${conditions}`,
+          });
+        }
+      });
+
+      // Sort by predictedSnow (or snow72h as fallback)
+      resorts.sort((a, b) => (b.predictedSnow || b.snow72h) - (a.predictedSnow || a.snow72h));
+
+      console.log(`[Scraper] Found ${resorts.length} resorts with snowfall data`);
+      return resorts.slice(0, limit);
+
+    } catch (error) {
+      console.error('[Scraper] Failed to fetch top snowfall:', error);
+      return [];
+    }
+  }
+
+  private regionToState(region: string): string {
+    const map: Record<string, string> = {
+      'colorado': 'CO',
+      'utah': 'UT',
+      'california': 'CA',
+      'vermont': 'VT',
+      'wyoming': 'WY',
+      'montana': 'MT',
+      'idaho': 'ID',
+      'oregon': 'OR',
+      'washington': 'WA',
+      'new-mexico': 'NM',
+      'new-york': 'NY',
+      'michigan': 'MI',
+      'wisconsin': 'WI',
+      'minnesota': 'MN',
+      'maine': 'ME',
+      'new-hampshire': 'NH',
+      'nevada': 'NV',
+      'pennsylvania': 'PA',
+      'alaska': 'AK',
+      'arizona': 'AZ',
+    };
+    return map[region.toLowerCase()] || 'US';
+  }
+
+  private stateToFullName(state: string): string {
+    const map: Record<string, string> = {
+      'CO': 'Colorado',
+      'UT': 'Utah',
+      'CA': 'California',
+      'VT': 'Vermont',
+      'WY': 'Wyoming',
+      'MT': 'Montana',
+      'ID': 'Idaho',
+      'OR': 'Oregon',
+      'WA': 'Washington',
+      'NM': 'New Mexico',
+      'NY': 'New York',
+      'MI': 'Michigan',
+      'WI': 'Wisconsin',
+      'MN': 'Minnesota',
+      'ME': 'Maine',
+      'NH': 'New Hampshire',
+      'NV': 'Nevada',
+      'PA': 'Pennsylvania',
+      'AK': 'Alaska',
+      'AZ': 'Arizona',
+    };
+    return map[state] || state;
+  }
+
+  /**
    * Discover all resorts from the main United States list
    */
   async discoverResorts(): Promise<Array<{ name: string; url: string; region: string }>> {

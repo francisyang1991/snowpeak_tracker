@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { supabase, getToday, getHoursAgo, getDaysFromNow } from '../db/supabase.js';
 import { geminiService } from '../services/gemini.js';
+import { onTheSnowScraper } from '../services/onTheSnow.js';
 
 export const forecastRoutes = Router();
 
@@ -178,9 +179,24 @@ forecastRoutes.get('/top', async (req, res) => {
       }
     }
 
-    // 3. Cache miss or refresh requested - fetch fresh data from Gemini
+    // 3. Cache miss or refresh requested - fetch fresh data from OnTheSnow scraper
     console.log(`[Cache MISS] Fetching fresh data for region: ${regionStr}`);
-    const topResorts = await geminiService.fetchTopSnowfallResorts(regionStr, limitNum);
+    
+    let topResorts: any[] = [];
+    try {
+      // Try OnTheSnow scraper first (real data)
+      const scrapedResorts = await onTheSnowScraper.fetchTopSnowfallResorts(regionStr, limitNum);
+      if (scrapedResorts.length > 0) {
+        topResorts = scrapedResorts;
+        console.log(`[Source] Got ${topResorts.length} resorts from OnTheSnow scraper`);
+      } else {
+        throw new Error('No data from scraper');
+      }
+    } catch (scraperError) {
+      // Fallback to Gemini if scraper fails
+      console.warn(`[Source] Scraper failed, falling back to Gemini:`, scraperError);
+      topResorts = await geminiService.fetchTopSnowfallResorts(regionStr, limitNum);
+    }
     
     // Update memory cache
     topResortsCache[regionStr] = {
