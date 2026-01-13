@@ -8,7 +8,8 @@
     "build": "tsc",
     "start": "node dist/index.js",
     "preload": "node --env-file=.env --import tsx src/services/preloader.ts",
-    "seed": "node --env-file=.env --import tsx src/db/seed.ts"
+    "seed": "node --env-file=.env --import tsx src/db/seed.ts",
+    "crawl": "node --env-file=.env --import tsx src/scripts/triggerCrawl.ts"
   },
   "dependencies": {
     "@google/genai": "^1.34.0",

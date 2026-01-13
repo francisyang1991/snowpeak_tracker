@@ -91,11 +91,14 @@ export const supabase = supabaseInstance;
 
 /**
  * Get today's date as ISO string (for date comparisons)
+ * Uses local date to avoid timezone issues
  */
 export function getToday(): string {
   const today = new Date();
-  today.setHours(0, 0, 0, 0);
-  return today.toISOString().split('T')[0];
+  const year = today.getFullYear();
+  const month = String(today.getMonth() + 1).padStart(2, '0');
+  const day = String(today.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
 }
 
 /**

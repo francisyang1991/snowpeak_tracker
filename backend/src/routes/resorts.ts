@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { supabase, getToday, getHoursAgo, formatDateShort, getDayName } from '../db/supabase.js';
 import { geminiService } from '../services/gemini.js';
+import { onTheSnowScraper } from '../services/onTheSnow.js';
 
 export const resortRoutes = Router();
 
@@ -100,7 +101,7 @@ resortRoutes.get('/', async (req, res) => {
 /**
  * GET /api/resorts/:id
  * Get single resort with full details
- * Uses database cache (1 hour), only calls Gemini API when cache is stale
+ * Uses database cache (1 hour), tries OnTheSnow scraper first, then Gemini
  */
 resortRoutes.get('/:id', async (req, res) => {
   try {
@@ -186,13 +187,20 @@ resortRoutes.get('/:id', async (req, res) => {
           tempLow: mode === 'prisma' ? f.tempLow : f.temp_low,
           condition: f.condition,
         })),
-        lastUpdated: (latestReport as any)?.[reportCreatedAtCol],
+        lastUpdated: new Date((latestReport as any)?.[reportCreatedAtCol] || new Date()).toLocaleString('en-US', { 
+          month: '2-digit', 
+          day: '2-digit', 
+          year: 'numeric',
+          hour: '2-digit',
+          minute: '2-digit',
+          hour12: false
+        }),
         cached: true,
         cacheAge: cacheAgeSeconds,
       });
     }
 
-    // 2. Cache miss - fetch from Gemini
+    // 2. Cache miss - fetch from scraper or Gemini
     console.log(
       `[Cache MISS] Resort: ${id}, Reason: ${
         refresh === 'true'
@@ -206,7 +214,17 @@ resortRoutes.get('/:id', async (req, res) => {
     );
     
     const resortName = id.replace(/-/g, ' ');
-    const freshData = await geminiService.fetchResortSnowData(resortName);
+    let freshData: any;
+    
+    // Try scraper first
+    try {
+      const state = (resort as any)?.state; // Use state from DB if available
+      freshData = await onTheSnowScraper.fetchResortSnowData(resortName, state);
+      console.log(`[Source] Fetched ${resortName} from OnTheSnow`);
+    } catch (scraperError) {
+      console.warn(`[Source] Scraper failed for ${resortName}, falling back to Gemini:`, scraperError);
+      freshData = await geminiService.fetchResortSnowData(resortName);
+    }
 
     // Upsert resort
     const nowTimestamp = new Date().toISOString();
@@ -220,8 +238,6 @@ resortRoutes.get('/:id', async (req, res) => {
               location: freshData.location || 'USA',
               state: extractState(freshData.location),
               region: determineRegion(freshData.location),
-              // Prisma schema requires lat/lng (non-null). Gemini resort fetch doesn't always provide them,
-              // so default to 0 and allow later enrichment via seeding/map pipeline.
               latitude: (freshData as any).latitude ?? 0,
               longitude: (freshData as any).longitude ?? 0,
               websiteUrl: freshData.websiteUrl,
@@ -260,7 +276,7 @@ resortRoutes.get('/:id', async (req, res) => {
               liftsOpen: freshData.liftsOpen || 0,
               trailsOpen: freshData.trailsOpen || 0,
               conditions: freshData.conditions,
-              dataSource: 'gemini',
+              dataSource: freshData.sourceUrls ? 'onthesnow' : 'gemini',
               rawResponse: freshData,
               createdAt: nowTimestamp,
             }
@@ -273,7 +289,7 @@ resortRoutes.get('/:id', async (req, res) => {
               lifts_open: freshData.liftsOpen || 0,
               trails_open: freshData.trailsOpen || 0,
               conditions: freshData.conditions,
-              data_source: 'gemini',
+              data_source: freshData.sourceUrls ? 'onthesnow' : 'gemini',
               raw_response: freshData,
               created_at: nowTimestamp,
             },
@@ -328,7 +344,14 @@ resortRoutes.get('/:id', async (req, res) => {
     res.json({
       ...freshData,
       id,
-      lastUpdated: new Date().toISOString(),
+      lastUpdated: new Date().toLocaleString('en-US', { 
+        month: '2-digit', 
+        day: '2-digit', 
+        year: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit',
+        hour12: false
+      }),
       cached: false,
     });
   } catch (error) {
@@ -434,10 +457,29 @@ function determineRegion(location: string): string {
 
 function parseDate(dateStr: string): string | null {
   try {
+    if (!dateStr) return null;
+    
+    // Check if already in YYYY-MM-DD format
+    if (/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
+      return dateStr;
+    }
+
     const year = new Date().getFullYear();
     const [month, day] = dateStr.split('/').map(Number);
     if (month && day) {
-      const date = new Date(year, month - 1, day);
+      // Handle year rollover (e.g. today is Dec, forecast is Jan)
+      // If the parsed date is more than 6 months in the past, assume it's next year
+      const now = new Date();
+      let date = new Date(year, month - 1, day);
+      
+      const diffMonths = (now.getMonth() - (month - 1)) + (12 * (now.getFullYear() - year));
+      if (diffMonths > 6) {
+         date = new Date(year + 1, month - 1, day);
+      } else if (diffMonths < -6) {
+         // Rare: forecast says Dec when we are in Jan (maybe old data?)
+         date = new Date(year - 1, month - 1, day);
+      }
+
       return date.toISOString().split('T')[0];
     }
     return null;
